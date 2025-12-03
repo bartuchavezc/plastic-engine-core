@@ -12,14 +12,14 @@ import (
 	"go.opentelemetry.io/otel"
 
 	clusterhttputil "plastic-engine-core/internal/adapters/http/cluster/httputil"
-	coordinator "plastic-engine-core/internal/core/cluster/coordinator"
-	coreindex "plastic-engine-core/internal/core/index"
+	"plastic-engine-core/internal/core/cluster"
+	indexes "plastic-engine-core/internal/core/cluster/indexes"
 )
 
 var tracer = otel.Tracer("cluster/http/index")
 
 // Mount registers index-related routes on the provided router.
-func Mount(r chi.Router, coord *coordinator.Coordinator) {
+func Mount(r chi.Router, coord *cluster.Coordinator) {
 	handler := &handler{
 		coord: coord,
 	}
@@ -31,7 +31,7 @@ func Mount(r chi.Router, coord *coordinator.Coordinator) {
 }
 
 type handler struct {
-	coord *coordinator.Coordinator
+	coord *cluster.Coordinator
 }
 
 type createIndexRequest struct {
@@ -87,11 +87,11 @@ type computedComponentBody struct {
 	Transform string `json:"transform"`
 }
 
-func convertShardConfig(body *shardConfigBody) coreindex.ShardConfig {
-	cfg := coreindex.ShardConfig{}
+func convertShardConfig(body *shardConfigBody) indexes.ShardConfig {
+	cfg := indexes.ShardConfig{}
 	if body == nil {
-		cfg.Strategy = coreindex.ShardStrategyAutomatic
-		cfg.Automatic = &coreindex.AutomaticShardConfig{ShardCount: 1}
+		cfg.Strategy = indexes.ShardStrategyAutomatic
+		cfg.Automatic = &indexes.AutomaticShardConfig{ShardCount: 1}
 		return cfg
 	}
 
@@ -99,49 +99,49 @@ func convertShardConfig(body *shardConfigBody) coreindex.ShardConfig {
 	if strategy == "" {
 		switch {
 		case body.Date != nil:
-			strategy = string(coreindex.ShardStrategyDate)
+			strategy = string(indexes.ShardStrategyDate)
 		case body.Computed != nil:
-			strategy = string(coreindex.ShardStrategyComputed)
+			strategy = string(indexes.ShardStrategyComputed)
 		default:
-			strategy = string(coreindex.ShardStrategyAutomatic)
+			strategy = string(indexes.ShardStrategyAutomatic)
 		}
 	}
 
-	cfg.Strategy = coreindex.ShardStrategy(strategy)
+	cfg.Strategy = indexes.ShardStrategy(strategy)
 
 	switch cfg.Strategy {
-	case coreindex.ShardStrategyAutomatic:
-		cfg.Automatic = &coreindex.AutomaticShardConfig{ShardCount: 1}
+	case indexes.ShardStrategyAutomatic:
+		cfg.Automatic = &indexes.AutomaticShardConfig{ShardCount: 1}
 		if body.Automatic != nil {
 			if body.Automatic.ShardCount > 0 {
 				cfg.Automatic.ShardCount = body.Automatic.ShardCount
 			}
 			cfg.Automatic.Field = strings.TrimSpace(body.Automatic.Field)
 		}
-	case coreindex.ShardStrategyDate:
-		cfg.Date = &coreindex.DateShardConfig{
-			Granularity: coreindex.DateGranularityMonth,
+	case indexes.ShardStrategyDate:
+		cfg.Date = &indexes.DateShardConfig{
+			Granularity: indexes.DateGranularityMonth,
 		}
 		if body.Date != nil {
 			cfg.Date.Field = strings.TrimSpace(body.Date.Field)
 			if g := strings.TrimSpace(body.Date.Granularity); g != "" {
-				cfg.Date.Granularity = coreindex.DateGranularity(g)
+				cfg.Date.Granularity = indexes.DateGranularity(g)
 			}
 		}
-	case coreindex.ShardStrategyComputed:
-		cfg.Computed = &coreindex.ComputedShardConfig{}
+	case indexes.ShardStrategyComputed:
+		cfg.Computed = &indexes.ComputedShardConfig{}
 		if body.Computed != nil {
-			cfg.Computed.Components = make([]coreindex.ComputedComponent, 0, len(body.Computed.Components))
+			cfg.Computed.Components = make([]indexes.ComputedComponent, 0, len(body.Computed.Components))
 			for _, comp := range body.Computed.Components {
-				cfg.Computed.Components = append(cfg.Computed.Components, coreindex.ComputedComponent{
+				cfg.Computed.Components = append(cfg.Computed.Components, indexes.ComputedComponent{
 					Field:     strings.TrimSpace(comp.Field),
-					Transform: coreindex.ComputedTransform(strings.TrimSpace(comp.Transform)),
+					Transform: indexes.ComputedTransform(strings.TrimSpace(comp.Transform)),
 				})
 			}
 		}
 	default:
-		cfg.Strategy = coreindex.ShardStrategyAutomatic
-		cfg.Automatic = &coreindex.AutomaticShardConfig{ShardCount: 1}
+		cfg.Strategy = indexes.ShardStrategyAutomatic
+		cfg.Automatic = &indexes.AutomaticShardConfig{ShardCount: 1}
 	}
 
 	return cfg
@@ -157,21 +157,21 @@ func (h *handler) handleCreateIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req := coreindex.CreateIndexRequest{
+	req := indexes.CreateIndexRequest{
 		ID:               payload.ID,
 		Name:             payload.Name,
 		DefaultAnalyzer:  payload.DefaultAnalyzer,
 		DefaultTokenizer: payload.DefaultTokenizer,
 		MappingVersion:   payload.MappingVersion,
 		InitialShardKeys: append([]string(nil), payload.InitialShardKeys...),
-		FieldMappings:    make([]coreindex.FieldMapping, 0, len(payload.FieldMappings)),
+		FieldMappings:    make([]indexes.FieldMapping, 0, len(payload.FieldMappings)),
 		ShardConfig:      convertShardConfig(payload.ShardConfig),
 	}
 
 	for _, fm := range payload.FieldMappings {
-		field := coreindex.FieldMapping{
+		field := indexes.FieldMapping{
 			Name:      fm.Name,
-			Type:      coreindex.FieldType(fm.Type),
+			Type:      indexes.FieldType(fm.Type),
 			Analyzer:  fm.Analyzer,
 			Tokenizer: fm.Tokenizer,
 			Stored:    fm.Stored != nil && *fm.Stored,
@@ -186,18 +186,18 @@ func (h *handler) handleCreateIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.ShardConfig.Strategy == "" {
-		req.ShardConfig.Strategy = coreindex.ShardStrategyAutomatic
+		req.ShardConfig.Strategy = indexes.ShardStrategyAutomatic
 	}
 	req.ShardStrategy = req.ShardConfig.Strategy
 
 	resp, err := h.coord.CreateIndex(ctx, req)
 	if err != nil {
 		switch {
-		case errors.Is(err, coreindex.ErrIndexIDExists),
-			errors.Is(err, coreindex.ErrIndexNameExists):
+		case errors.Is(err, indexes.ErrIndexIDExists),
+			errors.Is(err, indexes.ErrIndexNameExists):
 			http.Error(w, err.Error(), http.StatusConflict)
 		default:
-			var validationErr *coreindex.ValidationError
+			var validationErr *indexes.ValidationError
 			if errors.As(err, &validationErr) {
 				http.Error(w, validationErr.Error(), http.StatusBadRequest)
 				return
@@ -252,7 +252,7 @@ func (h *handler) handleIngestDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ingestReq := coordinator.Request{
+	ingestReq := cluster.Request{
 		IndexID:    indexID,
 		DocumentID: req.DocumentID,
 		Routing:    req.Routing,
@@ -260,7 +260,7 @@ func (h *handler) handleIngestDocument(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.coord.IngestDocument(ctx, ingestReq); err != nil {
-		var validationErr *coreindex.ValidationError
+		var validationErr *indexes.ValidationError
 		switch {
 		case errors.Is(err, fmt.Errorf("shard not found for routing metadata")):
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -305,7 +305,7 @@ func (h *handler) handleGetIndex(w http.ResponseWriter, r *http.Request) {
 
 	definition, err := h.coord.GetIndex(ctx, indexID)
 	if err != nil {
-		if errors.Is(err, coreindex.ErrIndexNotFound) {
+		if errors.Is(err, indexes.ErrIndexNotFound) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -366,7 +366,7 @@ type computedComponentResponse struct {
 	Transform string `json:"transform"`
 }
 
-func toIndexResponse(def coreindex.IndexDefinition) indexResponse {
+func toIndexResponse(def indexes.IndexDefinition) indexResponse {
 	resp := indexResponse{
 		ID:               def.ID,
 		Name:             def.Name,
@@ -396,26 +396,26 @@ func toIndexResponse(def coreindex.IndexDefinition) indexResponse {
 	return resp
 }
 
-func toShardConfigResponse(cfg coreindex.ShardConfig) shardConfigResponse {
+func toShardConfigResponse(cfg indexes.ShardConfig) shardConfigResponse {
 	resp := shardConfigResponse{
 		Strategy: string(cfg.Strategy),
 	}
 	switch cfg.Strategy {
-	case coreindex.ShardStrategyAutomatic:
+	case indexes.ShardStrategyAutomatic:
 		if cfg.Automatic != nil {
 			resp.Automatic = &automaticShardConfigResponse{
 				ShardCount: cfg.Automatic.ShardCount,
 				Field:      cfg.Automatic.Field,
 			}
 		}
-	case coreindex.ShardStrategyDate:
+	case indexes.ShardStrategyDate:
 		if cfg.Date != nil {
 			resp.Date = &dateShardConfigResponse{
 				Field:       cfg.Date.Field,
 				Granularity: string(cfg.Date.Granularity),
 			}
 		}
-	case coreindex.ShardStrategyComputed:
+	case indexes.ShardStrategyComputed:
 		if cfg.Computed != nil {
 			components := make([]computedComponentResponse, 0, len(cfg.Computed.Components))
 			for _, comp := range cfg.Computed.Components {

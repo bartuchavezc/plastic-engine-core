@@ -12,26 +12,26 @@ import (
 	"testing"
 	"time"
 
-	coordinator "plastic-engine-core/internal/core/cluster/coordinator"
-	coreindex "plastic-engine-core/internal/core/index"
-	"plastic-engine-core/internal/helpers"
+	"plastic-engine-core/internal/core/cluster"
+	indexes "plastic-engine-core/internal/core/cluster/indexes"
+	"plastic-engine-core/internal/pkg/logger"
 )
 
 func TestHandlerReturnsShardNotFound(t *testing.T) {
-	handler := coordinator.Handler{
+	handler := cluster.Handler{
 		IndexRepo:  &staticIndexRepo{},
 		DB:         openTestDB(t),
 		HTTPClient: http.DefaultClient,
 	}
 
-	req := coordinator.Request{
+	req := cluster.Request{
 		IndexID:    "idx-test",
 		DocumentID: "doc-1",
 		Payload:    json.RawMessage(`{"title":"hello","attempts":"5","created_at":"2006-01-02T15:04:05Z"}`),
 	}
 
 	err := handler.Handle(context.Background(), req)
-	if err == nil || !errors.Is(err, coordinator.ErrShardNotFound) {
+	if err == nil || !errors.Is(err, cluster.ErrShardNotFound) {
 		t.Fatalf("expected ErrShardNotFound, got %v", err)
 	}
 }
@@ -51,14 +51,14 @@ func TestHandlerForwardsDocument(t *testing.T) {
 	seedNode(t, db, "node-1", server.URL)
 	seedShard(t, db, "idx-test", "idx-test-default", "node-1")
 
-	handler := coordinator.Handler{
+	handler := cluster.Handler{
 		IndexRepo:  &staticIndexRepo{},
 		DB:         db,
 		HTTPClient: server.Client(),
-		Logger:     helpers.DefaultLogger(),
+		Logger:     logger.DefaultLogger(),
 	}
 
-	req := coordinator.Request{
+	req := cluster.Request{
 		IndexID:    "idx-test",
 		DocumentID: "doc-1",
 		Payload:    json.RawMessage(`{"title":"hello","attempts":"5","created_at":"2006-01-02T15:04:05Z"}`),
@@ -94,21 +94,21 @@ func TestHandlerValidatesRequiredFields(t *testing.T) {
 	seedNode(t, db, "node-1", "http://example.com")
 	seedShard(t, db, "idx-test", "idx-test-default", "node-1")
 
-	handler := coordinator.Handler{
+	handler := cluster.Handler{
 		IndexRepo:  &staticIndexRepo{},
 		DB:         db,
 		HTTPClient: http.DefaultClient,
-		Logger:     helpers.DefaultLogger(),
+		Logger:     logger.DefaultLogger(),
 	}
 
-	req := coordinator.Request{
+	req := cluster.Request{
 		IndexID:    "idx-test",
 		DocumentID: "doc-1",
 		Payload:    json.RawMessage(`{"title": ""}`),
 	}
 
 	err := handler.Handle(context.Background(), req)
-	var validationErr *coreindex.ValidationError
+	var validationErr *indexes.ValidationError
 	if err == nil || !errors.As(err, &validationErr) {
 		t.Fatalf("expected validation error, got %v", err)
 	}
@@ -116,19 +116,19 @@ func TestHandlerValidatesRequiredFields(t *testing.T) {
 
 type staticIndexRepo struct{}
 
-func (staticIndexRepo) GetIndex(context.Context, string) (coreindex.IndexDefinition, error) {
-	return coreindex.IndexDefinition{
+func (staticIndexRepo) GetIndex(context.Context, string) (indexes.IndexDefinition, error) {
+	return indexes.IndexDefinition{
 		ID:            "idx-test",
 		Name:          "test",
-		ShardStrategy: coreindex.ShardStrategyAutomatic,
-		FieldMappings: []coreindex.FieldMapping{
-			{Name: "title", Type: coreindex.FieldTypeText, Required: true, Indexed: true},
-			{Name: "attempts", Type: coreindex.FieldTypeInteger, Indexed: true},
-			{Name: "created_at", Type: coreindex.FieldTypeDate, Indexed: true},
+		ShardStrategy: indexes.ShardStrategyAutomatic,
+		FieldMappings: []indexes.FieldMapping{
+			{Name: "title", Type: indexes.FieldTypeText, Required: true, Indexed: true},
+			{Name: "attempts", Type: indexes.FieldTypeInteger, Indexed: true},
+			{Name: "created_at", Type: indexes.FieldTypeDate, Indexed: true},
 		},
-		ShardConfig: coreindex.ShardConfig{
-			Strategy:  coreindex.ShardStrategyAutomatic,
-			Automatic: &coreindex.AutomaticShardConfig{ShardCount: 1},
+		ShardConfig: indexes.ShardConfig{
+			Strategy:  indexes.ShardStrategyAutomatic,
+			Automatic: &indexes.AutomaticShardConfig{ShardCount: 1},
 		},
 	}, nil
 }
@@ -136,7 +136,7 @@ func (staticIndexRepo) GetIndex(context.Context, string) (coreindex.IndexDefinit
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "ingest.db")
-	db, err := coordinator.OpenMetadataDB(dbPath)
+	db, err := cluster.OpenMetadataDB(dbPath)
 	if err != nil {
 		t.Fatalf("OpenMetadataDB: %v", err)
 	}

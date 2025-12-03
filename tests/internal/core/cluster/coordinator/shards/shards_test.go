@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	coordinator "plastic-engine-core/internal/core/cluster/coordinator"
-	shardspkg "plastic-engine-core/internal/core/cluster/coordinator/shards"
+	"plastic-engine-core/internal/core/cluster"
+	shardspkg "plastic-engine-core/internal/core/cluster/shards"
 )
 
 func TestAssignShardsToNodeTxAssignsPendingShard(t *testing.T) {
@@ -59,7 +59,7 @@ func TestLookupPrimaryShardReturnsInfo(t *testing.T) {
 func openShardTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "shards.db")
-	db, err := coordinator.OpenMetadataDB(dbPath)
+	db, err := cluster.OpenMetadataDB(dbPath)
 	if err != nil {
 		t.Fatalf("OpenMetadataDB: %v", err)
 	}

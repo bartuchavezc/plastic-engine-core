@@ -10,8 +10,8 @@ import (
 	"time"
 
 	node "plastic-engine-core/internal/core/search"
-	"plastic-engine-core/internal/core/search/shard"
-	"plastic-engine-core/internal/helpers"
+	"plastic-engine-core/internal/core/search/shards"
+	"plastic-engine-core/internal/pkg/logger"
 )
 
 func TestNodeInitialisePersistsNodeID(t *testing.T) {
@@ -31,7 +31,7 @@ func TestNodeInitialisePersistsNodeID(t *testing.T) {
 		"http://localhost:8080",
 		fakeClient,
 		manager,
-		helpers.DefaultLogger(),
+		logger.DefaultLogger(),
 	)
 
 	if err := node.Initialize(); err != nil {
@@ -66,7 +66,7 @@ func TestNodeStartHeartbeatStopsWithContext(t *testing.T) {
 		"http://localhost:8080",
 		fakeClient,
 		manager,
-		helpers.DefaultLogger(),
+		logger.DefaultLogger(),
 	)
 
 	if err := node.Initialize(); err != nil {

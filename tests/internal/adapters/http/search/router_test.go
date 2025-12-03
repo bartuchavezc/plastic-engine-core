@@ -8,14 +8,14 @@ import (
 	"testing"
 
 	searchhttp "plastic-engine-core/internal/adapters/http/search"
-	"plastic-engine-core/internal/core/search/indexer"
-	"plastic-engine-core/internal/helpers"
+	"plastic-engine-core/internal/core/search/document"
+	"plastic-engine-core/internal/pkg/logger"
 )
 
 func TestNewRouterHealthz(t *testing.T) {
 	t.Parallel()
 
-	router := searchhttp.NewRouter(&stubIndexer{}, helpers.DefaultLogger())
+	router := searchhttp.NewRouter(&stubIndexer{}, logger.DefaultLogger())
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rr := httptest.NewRecorder()
 
@@ -34,7 +34,7 @@ func TestDocumentsEndpointCallsIndexer(t *testing.T) {
 	t.Parallel()
 
 	idx := &stubIndexer{}
-	router := searchhttp.NewRouter(idx, helpers.DefaultLogger())
+	router := searchhttp.NewRouter(idx, logger.DefaultLogger())
 
 	body := []byte(`{
 		"index_id": "idx",
@@ -61,11 +61,11 @@ func TestDocumentsEndpointCallsIndexer(t *testing.T) {
 }
 
 type stubIndexer struct {
-	commands []indexer.Command
+	commands []document.Command
 	err      error
 }
 
-func (s *stubIndexer) Index(ctx context.Context, cmd indexer.Command) error {
+func (s *stubIndexer) Index(ctx context.Context, cmd document.Command) error {
 	s.commands = append(s.commands, cmd)
 	return s.err
 }

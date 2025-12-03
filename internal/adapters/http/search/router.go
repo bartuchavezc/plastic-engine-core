@@ -6,19 +6,19 @@ import (
 	"errors"
 	"net/http"
 
-	"plastic-engine-core/internal/core/search/indexer"
-	"plastic-engine-core/internal/helpers"
+	"plastic-engine-core/internal/core/search/document"
+	"plastic-engine-core/internal/pkg/logger"
 )
 
 // Indexer defines the contract required to index documents.
 type Indexer interface {
-	Index(ctx context.Context, cmd indexer.Command) error
+	Index(ctx context.Context, cmd document.Command) error
 }
 
 // NewRouter exposes the HTTP surface of a search node.
-func NewRouter(idx Indexer, logger helpers.Logger) http.Handler {
-	if logger == nil {
-		logger = helpers.DefaultLogger()
+func NewRouter(idx Indexer, log logger.Logger) http.Handler {
+	if log == nil {
+		log = logger.DefaultLogger()
 	}
 
 	mux := http.NewServeMux()
@@ -29,7 +29,7 @@ func NewRouter(idx Indexer, logger helpers.Logger) http.Handler {
 	})
 
 	mux.HandleFunc("/documents", func(w http.ResponseWriter, r *http.Request) {
-		handleDocumentIngest(w, r, idx, logger)
+		handleDocumentIngest(w, r, idx, log)
 	})
 
 	return mux
@@ -43,7 +43,7 @@ type ingestRequest struct {
 	Payload    json.RawMessage   `json:"payload"`
 }
 
-func handleDocumentIngest(w http.ResponseWriter, r *http.Request, idx Indexer, logger helpers.Logger) {
+func handleDocumentIngest(w http.ResponseWriter, r *http.Request, idx Indexer, log logger.Logger) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -69,7 +69,7 @@ func handleDocumentIngest(w http.ResponseWriter, r *http.Request, idx Indexer, l
 		}
 	}
 
-	cmd := indexer.Command{
+	cmd := document.Command{
 		IndexID:    req.IndexID,
 		ShardID:    req.ShardID,
 		DocumentID: req.DocumentID,
@@ -79,11 +79,11 @@ func handleDocumentIngest(w http.ResponseWriter, r *http.Request, idx Indexer, l
 
 	if err := idx.Index(r.Context(), cmd); err != nil {
 		switch {
-		case errors.Is(err, indexer.ErrInvalidCommand):
+		case errors.Is(err, document.ErrInvalidCommand):
 			http.Error(w, err.Error(), http.StatusBadRequest)
-		case errors.Is(err, indexer.ErrShardNotLoaded):
+		case errors.Is(err, document.ErrShardNotLoaded):
 			http.Error(w, err.Error(), http.StatusNotFound)
-		case errors.Is(err, indexer.ErrBackpressure):
+		case errors.Is(err, document.ErrBackpressure):
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		default:
 			http.Error(w, "failed to index document", http.StatusInternalServerError)
@@ -91,10 +91,10 @@ func handleDocumentIngest(w http.ResponseWriter, r *http.Request, idx Indexer, l
 		return
 	}
 
-	logger.Info("document ingested",
-		helpers.Field{Key: "index_id", Value: req.IndexID},
-		helpers.Field{Key: "shard_id", Value: req.ShardID},
-		helpers.Field{Key: "document_id", Value: req.DocumentID},
+	log.Info("document ingested",
+		logger.Field{Key: "index_id", Value: req.IndexID},
+		logger.Field{Key: "shard_id", Value: req.ShardID},
+		logger.Field{Key: "document_id", Value: req.DocumentID},
 	)
 
 	w.WriteHeader(http.StatusAccepted)

@@ -10,15 +10,15 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	corehttputil "plastic-engine-core/internal/adapters/http/cluster/httputil"
-	coordinator "plastic-engine-core/internal/core/cluster/coordinator"
-	coreindex "plastic-engine-core/internal/core/index"
+	"plastic-engine-core/internal/core/cluster"
+	indexes "plastic-engine-core/internal/core/cluster/indexes"
 	searchquery "plastic-engine-core/internal/core/search/query"
 )
 
 var tracer = otel.Tracer("cluster/http/search")
 
-// Mount registers the search endpoint exposed by the coordinator.
-func Mount(r chi.Router, coord *coordinator.Coordinator) {
+// Mount registers the search endpoint exposed by the cluster.
+func Mount(r chi.Router, coord *cluster.Coordinator) {
 	handler := &handler{
 		coord: coord,
 	}
@@ -27,7 +27,7 @@ func Mount(r chi.Router, coord *coordinator.Coordinator) {
 }
 
 type handler struct {
-	coord *coordinator.Coordinator
+	coord *cluster.Coordinator
 }
 
 func (h *handler) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -55,7 +55,7 @@ func (h *handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	definition, err := h.coord.GetIndex(ctx, req.IndexID)
 	if err != nil {
-		if errors.Is(err, coreindex.ErrIndexNotFound) {
+		if errors.Is(err, indexes.ErrIndexNotFound) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}

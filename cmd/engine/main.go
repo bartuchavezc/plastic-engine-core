@@ -8,7 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"plastic-engine-core/internal/helpers"
+	"plastic-engine-core/internal/pkg/logger"
 )
 
 type WhoamiResponse struct {
@@ -18,7 +18,7 @@ type WhoamiResponse struct {
 }
 
 func main() {
-	logger := helpers.DefaultLogger()
+	log := logger.DefaultLogger()
 
 	router := chi.NewRouter()
 	role := os.Getenv("ROLE")
@@ -40,12 +40,12 @@ func main() {
 		}
 		err := json.NewEncoder(w).Encode(response)
 		if err != nil {
-			logger.Error("error writing response", helpers.Field{Key: "error", Value: err})
+			log.Error("error writing response", logger.Field{Key: "error", Value: err})
 		}
 	})
 
 	if err := http.ListenAndServe(fmt.Sprintf(":%s", port), router); err != nil {
-		logger.Error("server failed", helpers.Field{Key: "error", Value: err})
+		log.Error("server failed", logger.Field{Key: "error", Value: err})
 		os.Exit(1)
 	}
 }

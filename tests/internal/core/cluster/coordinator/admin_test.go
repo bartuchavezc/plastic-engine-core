@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"plastic-engine-core/internal/core/cluster/coordinator"
-	coreindex "plastic-engine-core/internal/core/index"
+	"plastic-engine-core/internal/core/cluster"
+	indexes "plastic-engine-core/internal/core/cluster/indexes"
 )
 
 func TestListShardsFiltersByIndex(t *testing.T) {
@@ -14,17 +14,17 @@ func TestListShardsFiltersByIndex(t *testing.T) {
 	coord := newTestCoordinator(t)
 	ctx := context.Background()
 
-	_, err := coord.CreateIndex(ctx, coreindex.CreateIndexRequest{
+	_, err := coord.CreateIndex(ctx, indexes.CreateIndexRequest{
 		ID:               "idx-admin-test",
 		Name:             "admin-test",
 		DefaultAnalyzer:  "simple",
 		DefaultTokenizer: "whitespace",
-		FieldMappings: []coreindex.FieldMapping{
-			{Name: "name", Type: coreindex.FieldTypeKeyword, Indexed: true},
+		FieldMappings: []indexes.FieldMapping{
+			{Name: "name", Type: indexes.FieldTypeKeyword, Indexed: true},
 		},
-		ShardConfig: coreindex.ShardConfig{
-			Strategy: coreindex.ShardStrategyAutomatic,
-			Automatic: &coreindex.AutomaticShardConfig{
+		ShardConfig: indexes.ShardConfig{
+			Strategy: indexes.ShardStrategyAutomatic,
+			Automatic: &indexes.AutomaticShardConfig{
 				ShardCount: 1,
 			},
 		},
@@ -33,7 +33,7 @@ func TestListShardsFiltersByIndex(t *testing.T) {
 		t.Fatalf("CreateIndex: %v", err)
 	}
 
-	shards, err := coord.ListShards(ctx, coordinator.ShardFilter{IndexID: "idx-admin-test"})
+	shards, err := coord.ListShards(ctx, cluster.ShardFilter{IndexID: "idx-admin-test"})
 	if err != nil {
 		t.Fatalf("ListShards: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestListNodesReturnsHeartbeat(t *testing.T) {
 	coord := newTestCoordinator(t)
 	ctx := context.Background()
 
-	_, err := coord.Join(ctx, coordinator.JoinRequest{
+	_, err := coord.Join(ctx, cluster.JoinRequest{
 		NodeID:        "node-admin-test",
 		Role:          "search",
 		AdvertiseAddr: "http://127.0.0.1:0",
@@ -61,7 +61,7 @@ func TestListNodesReturnsHeartbeat(t *testing.T) {
 		t.Fatalf("Join: %v", err)
 	}
 
-	if err := coord.Heartbeat(ctx, coordinator.HeartbeatRequest{NodeID: "node-admin-test"}); err != nil {
+	if err := coord.Heartbeat(ctx, cluster.HeartbeatRequest{NodeID: "node-admin-test"}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
 

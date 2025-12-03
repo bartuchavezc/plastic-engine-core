@@ -1,4 +1,4 @@
-package node
+package search
 
 import (
 	"context"
@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"plastic-engine-core/internal/core/search/shard"
-	"plastic-engine-core/internal/helpers"
+	"plastic-engine-core/internal/core/search/shards"
+	"plastic-engine-core/internal/pkg/logger"
 )
 
 // ClusterClient abstracts the coordinator API the search node depends on.
@@ -29,10 +29,10 @@ type NodeInfo struct {
 // JoinResponse contains information returned by the coordinator when joining.
 type JoinResponse struct {
 	NodeID string
-	Shards []shard.Assignment
+	Shards []shards.Assignment
 }
 
-// HeartbeatReport represents the state snapshot reported back to the coordinator.
+// HeartbeatReport represents the state snapshot reported back to the cluster.
 type HeartbeatReport struct {
 	NodeID string
 	Shards []string
@@ -43,12 +43,12 @@ type SearchNode struct {
 	Info          NodeInfo
 	JoinAddress   string
 	ClusterClient ClusterClient
-	ShardManager  *shard.Manager
-	Logger        helpers.Logger
+	ShardManager  *shards.Manager
+	Logger        logger.Logger
 }
 
 // New instantiates a SearchNode ready to initialise.
-func New(info NodeInfo, joinAddr string, client ClusterClient, manager *shard.Manager, logger helpers.Logger) *SearchNode {
+func New(info NodeInfo, joinAddr string, client ClusterClient, manager *shards.Manager, logger logger.Logger) *SearchNode {
 	return &SearchNode{
 		Info:          info,
 		JoinAddress:   joinAddr,
@@ -68,10 +68,10 @@ func (n *SearchNode) Initialize() error {
 		}
 		if n.Info.ID == "" {
 			if diskID, err := n.loadNodeID(); err != nil {
-				n.Logger.Error("failed to load node id from disk", helpers.Field{Key: "error", Value: err})
+				n.Logger.Error("failed to load node id from disk", logger.Field{Key: "error", Value: err})
 			} else if diskID != "" {
 				n.Info.ID = diskID
-				n.Logger.Info("loaded node id from disk", helpers.Field{Key: "node_id", Value: diskID})
+				n.Logger.Info("loaded node id from disk", logger.Field{Key: "node_id", Value: diskID})
 			}
 		}
 	}
@@ -86,7 +86,7 @@ func (n *SearchNode) Initialize() error {
 	}
 
 	if err := n.persistNodeID(resp.NodeID); err != nil {
-		n.Logger.Error("failed to persist node id", helpers.Field{Key: "error", Value: err})
+		n.Logger.Error("failed to persist node id", logger.Field{Key: "error", Value: err})
 	}
 
 	return n.ShardManager.Sync(resp.Shards)
@@ -111,7 +111,7 @@ func (n *SearchNode) StartHeartbeat(ctx context.Context, interval time.Duration)
 				}
 
 				if err := n.ClusterClient.Heartbeat(ctx, report); err != nil {
-					n.Logger.Error("heartbeat failed", helpers.Field{Key: "error", Value: err})
+					n.Logger.Error("heartbeat failed", logger.Field{Key: "error", Value: err})
 				}
 			}
 		}

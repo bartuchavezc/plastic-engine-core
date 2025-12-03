@@ -11,16 +11,16 @@ import (
 	"time"
 
 	searchhttp "plastic-engine-core/internal/adapters/http/search"
-	clusterclient "plastic-engine-core/internal/core/search/clusterclient"
-	"plastic-engine-core/internal/core/search/indexer"
-	searchnode "plastic-engine-core/internal/core/search/node"
-	"plastic-engine-core/internal/core/search/shard"
-	"plastic-engine-core/internal/helpers"
-	"plastic-engine-core/internal/telemetry/tracing"
+	client "plastic-engine-core/internal/core/search/client"
+	"plastic-engine-core/internal/core/search/document"
+	searchnode "plastic-engine-core/internal/core/search"
+	"plastic-engine-core/internal/core/search/shards"
+	"plastic-engine-core/internal/pkg/logger"
+	"plastic-engine-core/internal/adapters/telemetry/tracing"
 )
 
 func main() {
-	logger := helpers.DefaultLogger()
+	logger := logger.DefaultLogger()
 
 	role := os.Getenv("ROLE")
 	if role == "" {
@@ -28,7 +28,7 @@ func main() {
 	}
 
 	if role != "search" {
-		logger.Error("search binary must run with ROLE=search", helpers.Field{Key: "role", Value: role})
+		logger.Error("search binary must run with ROLE=search", logger.Field{Key: "role", Value: role})
 		os.Exit(1)
 	}
 
@@ -54,13 +54,13 @@ func main() {
 		advertiseAddr = fmt.Sprintf("http://localhost:%s", port)
 	}
 
-	nodeInfo := searchnode.NodeInfo{
+	nodeInfo := search.NodeInfo{
 		Role:          role,
 		AdvertiseAddr: advertiseAddr,
 		DataDir:       dataDir,
 	}
 
-	client := clusterclient.NewClient(joinAddr, &http.Client{})
+	client := client.NewClient(joinAddr, &http.Client{})
 	manager := shard.NewManager(dataDir)
 
 	tracerShutdown, err := tracing.Init(context.Background(), tracing.Config{
@@ -68,39 +68,39 @@ func main() {
 		Endpoint:    os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 	})
 	if err != nil {
-		logger.Error("failed to initialise tracing", helpers.Field{Key: "error", Value: err})
+		logger.Error("failed to initialise tracing", logger.Field{Key: "error", Value: err})
 		os.Exit(1)
 	}
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := tracerShutdown(shutdownCtx); err != nil {
-			logger.Error("error shutting down tracer", helpers.Field{Key: "error", Value: err})
+			logger.Error("error shutting down tracer", logger.Field{Key: "error", Value: err})
 		}
 	}()
 
-	node := searchnode.New(nodeInfo, joinAddr, client, manager, logger)
+	node := search.New(nodeInfo, joinAddr, client, manager, logger)
 
 	if err := node.Initialize(); err != nil {
-		logger.Error("failed to initialise search node", helpers.Field{Key: "error", Value: err})
+		logger.Error("failed to initialise search node", logger.Field{Key: "error", Value: err})
 		os.Exit(1)
 	}
 
-	logger.Info("search node initialised", helpers.Field{Key: "node_id", Value: node.Info.ID})
+	logger.Info("search node initialised", logger.Field{Key: "node_id", Value: node.Info.ID})
 
-	resolver := indexer.NewMetadataResolver(nil)
-	assignmentProvider := indexer.NewAssignmentProvider(manager, resolver)
-	planner := indexer.NewFieldPlanner(indexer.TokenizerFactory{}, indexer.AnalyzerFactory{})
-	writerFactory := func(sh *shard.Shard) *indexer.IndexWriter {
-		return indexer.NewIndexWriter(sh.Store)
+	resolver := document.NewMetadataResolver(nil)
+	assignmentProvider := document.NewAssignmentProvider(manager, resolver)
+	planner := document.NewFieldPlanner(document.TokenizerFactory{}, document.AnalyzerFactory{})
+	writerFactory := func(sh *shard.Shard) *document.IndexWriter {
+		return document.NewIndexWriter(sh.Store)
 	}
 
-	workerCfg := indexer.ShardWorkerConfig{
+	workerCfg := document.ShardWorkerConfig{
 		MaxWorkers:    4,
 		QueueCapacity: 256,
 	}
 
-	indexService := indexer.NewService(manager, assignmentProvider, planner, writerFactory, workerCfg, logger)
+	indexService := document.NewService(manager, assignmentProvider, planner, writerFactory, workerCfg, logger)
 	defer indexService.Close()
 
 	router := searchhttp.NewRouter(indexService, logger)
@@ -114,8 +114,8 @@ func main() {
 
 	go func() {
 		logger.Info("search HTTP server listening",
-			helpers.Field{Key: "listen_addr", Value: listenAddr},
-			helpers.Field{Key: "advertise_addr", Value: advertiseAddr},
+			logger.Field{Key: "listen_addr", Value: listenAddr},
+			logger.Field{Key: "advertise_addr", Value: advertiseAddr},
 		)
 
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -147,14 +147,14 @@ func main() {
 	}
 
 	if serverErr != nil {
-		logger.Error("search HTTP server stopped unexpectedly", helpers.Field{Key: "error", Value: serverErr})
+		logger.Error("search HTTP server stopped unexpectedly", logger.Field{Key: "error", Value: serverErr})
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Error("error shutting down HTTP server", helpers.Field{Key: "error", Value: err})
+		logger.Error("error shutting down HTTP server", logger.Field{Key: "error", Value: err})
 	}
 
 	if serverErr != nil {

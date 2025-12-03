@@ -10,13 +10,13 @@ import (
 	"go.opentelemetry.io/otel"
 
 	clusterhttputil "plastic-engine-core/internal/adapters/http/cluster/httputil"
-	coordinator "plastic-engine-core/internal/core/cluster/coordinator"
+	"plastic-engine-core/internal/core/cluster"
 )
 
 var tracer = otel.Tracer("cluster/http/management")
 
 // Mount registers cluster management endpoints such as node and shard listings.
-func Mount(r chi.Router, coord *coordinator.Coordinator) {
+func Mount(r chi.Router, coord *cluster.Coordinator) {
 	handler := &handler{
 		coord: coord,
 	}
@@ -27,7 +27,7 @@ func Mount(r chi.Router, coord *coordinator.Coordinator) {
 }
 
 type handler struct {
-	coord *coordinator.Coordinator
+	coord *cluster.Coordinator
 }
 
 func (h *handler) handleListNodes(w http.ResponseWriter, r *http.Request) {
@@ -64,7 +64,7 @@ func (h *handler) handleListShards(w http.ResponseWriter, r *http.Request) {
 	ctx, span := tracer.Start(r.Context(), "cluster.management.listShards")
 	defer span.End()
 
-	filter := coordinator.ShardFilter{
+	filter := cluster.ShardFilter{
 		IndexID: strings.TrimSpace(r.URL.Query().Get("index_id")),
 		NodeID:  strings.TrimSpace(r.URL.Query().Get("node_id")),
 		State:   strings.TrimSpace(r.URL.Query().Get("state")),
@@ -83,7 +83,7 @@ func (h *handler) handleListShardsForIndex(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	filter := coordinator.ShardFilter{
+	filter := cluster.ShardFilter{
 		IndexID: indexID,
 		NodeID:  strings.TrimSpace(r.URL.Query().Get("node_id")),
 		State:   strings.TrimSpace(r.URL.Query().Get("state")),
@@ -92,7 +92,7 @@ func (h *handler) handleListShardsForIndex(w http.ResponseWriter, r *http.Reques
 	h.respondWithShards(ctx, w, filter)
 }
 
-func (h *handler) respondWithShards(ctx context.Context, w http.ResponseWriter, filter coordinator.ShardFilter) {
+func (h *handler) respondWithShards(ctx context.Context, w http.ResponseWriter, filter cluster.ShardFilter) {
 	shards, err := h.coord.ListShards(ctx, filter)
 	if err != nil {
 		http.Error(w, "failed to list shards", http.StatusInternalServerError)

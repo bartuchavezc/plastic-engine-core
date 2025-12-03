@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	coordinator "plastic-engine-core/internal/core/cluster/coordinator"
+	"plastic-engine-core/internal/core/cluster"
 	searchsvc "plastic-engine-core/internal/core/cluster/search"
 )
 
@@ -18,7 +18,7 @@ func TestJoinServiceJoinAndHeartbeat(t *testing.T) {
 	service := searchsvc.NewJoinService(coord)
 	ctx := context.Background()
 
-	resp, err := service.Join(ctx, coordinator.JoinRequest{
+	resp, err := service.Join(ctx, cluster.JoinRequest{
 		Role:          "search",
 		AdvertiseAddr: "http://127.0.0.1:0",
 		DataDir:       t.TempDir(),
@@ -30,15 +30,15 @@ func TestJoinServiceJoinAndHeartbeat(t *testing.T) {
 		t.Fatalf("expected node id in response")
 	}
 
-	if err := service.Heartbeat(ctx, coordinator.HeartbeatRequest{NodeID: resp.NodeID}); err != nil {
+	if err := service.Heartbeat(ctx, cluster.HeartbeatRequest{NodeID: resp.NodeID}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
 }
 
-func newTestCoordinator(t *testing.T) *coordinator.Coordinator {
+func newTestCoordinator(t *testing.T) *cluster.Coordinator {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "search_join.db")
-	coord, err := coordinator.NewCoordinator("coordinator", "0", dbPath)
+	coord, err := cluster.NewCoordinator("coordinator", "0", dbPath)
 	if err != nil {
 		t.Fatalf("NewCoordinator: %v", err)
 	}

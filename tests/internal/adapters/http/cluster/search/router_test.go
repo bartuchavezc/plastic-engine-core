@@ -10,16 +10,16 @@ import (
 	"testing"
 
 	clusterhttp "plastic-engine-core/internal/adapters/http/cluster"
-	coordinator "plastic-engine-core/internal/core/cluster/coordinator"
-	clustersearch "plastic-engine-core/internal/core/cluster/search"
-	coreindex "plastic-engine-core/internal/core/index"
+	"plastic-engine-core/internal/core/cluster"
+	"plastic-engine-core/internal/core/cluster/nodes"
+	indexes "plastic-engine-core/internal/core/cluster/indexes"
 )
 
 func TestSearchEndpointValidatesPayload(t *testing.T) {
 	t.Parallel()
 
 	coord := newSearchTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, clustersearch.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
 
 	req := httptest.NewRequest(http.MethodPost, "/search", bytes.NewReader([]byte(`{}`)))
 	rec := httptest.NewRecorder()
@@ -35,7 +35,7 @@ func TestSearchEndpointIndexNotFound(t *testing.T) {
 	t.Parallel()
 
 	coord := newSearchTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, clustersearch.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
 
 	payload := map[string]any{
 		"index_id": "idx-missing",
@@ -66,26 +66,26 @@ func TestSearchEndpointReturnsNotImplementedForNow(t *testing.T) {
 	t.Parallel()
 
 	coord := newSearchTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, clustersearch.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
 
 	ctx := context.Background()
-	_, err := coord.CreateIndex(ctx, coreindex.CreateIndexRequest{
+	_, err := coord.CreateIndex(ctx, indexes.CreateIndexRequest{
 		ID:               "idx-orders",
 		Name:             "orders",
 		DefaultAnalyzer:  "simple",
 		DefaultTokenizer: "whitespace",
-		FieldMappings: []coreindex.FieldMapping{
+		FieldMappings: []indexes.FieldMapping{
 			{
 				Name:      "title",
-				Type:      coreindex.FieldTypeText,
+				Type:      indexes.FieldTypeText,
 				Analyzer:  "simple",
 				Tokenizer: "whitespace",
 				Indexed:   true,
 			},
 		},
-		ShardConfig: coreindex.ShardConfig{
-			Strategy: coreindex.ShardStrategyAutomatic,
-			Automatic: &coreindex.AutomaticShardConfig{
+		ShardConfig: indexes.ShardConfig{
+			Strategy: indexes.ShardStrategyAutomatic,
+			Automatic: &indexes.AutomaticShardConfig{
 				ShardCount: 1,
 			},
 		},
@@ -119,11 +119,11 @@ func TestSearchEndpointReturnsNotImplementedForNow(t *testing.T) {
 	}
 }
 
-func newSearchTestCoordinator(t *testing.T) *coordinator.Coordinator {
+func newSearchTestCoordinator(t *testing.T) *cluster.Coordinator {
 	t.Helper()
 
 	dbPath := filepath.Join(t.TempDir(), "coord.db")
-	coord, err := coordinator.NewCoordinator("coordinator", "0", dbPath)
+	coord, err := cluster.NewCoordinator("coordinator", "0", dbPath)
 	if err != nil {
 		t.Fatalf("NewCoordinator: %v", err)
 	}

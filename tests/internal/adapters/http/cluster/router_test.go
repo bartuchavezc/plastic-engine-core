@@ -12,16 +12,16 @@ import (
 	"time"
 
 	clusterhttp "plastic-engine-core/internal/adapters/http/cluster"
-	coordinator "plastic-engine-core/internal/core/cluster/coordinator"
-	clustersearch "plastic-engine-core/internal/core/cluster/search"
-	coreindex "plastic-engine-core/internal/core/index"
+	"plastic-engine-core/internal/core/cluster"
+	"plastic-engine-core/internal/core/cluster/nodes"
+	indexes "plastic-engine-core/internal/core/cluster/indexes"
 )
 
 func TestCreateIndexEndpoint(t *testing.T) {
 	t.Parallel()
 
 	coord := newTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, clustersearch.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
 
 	payload := map[string]any{
 		"id":   "idx-blog",
@@ -81,7 +81,7 @@ func TestCreateIndexEndpointValidationError(t *testing.T) {
 	t.Parallel()
 
 	coord := newTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, clustersearch.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
 
 	payload := map[string]any{
 		"name": "missing-id",
@@ -128,11 +128,11 @@ func TestIngestDocumentRoutesToPrimaryShard(t *testing.T) {
 	defer server.Close()
 
 	coord := newTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, clustersearch.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
 
 	ctx := context.Background()
 
-	_, err := coord.Join(ctx, coordinator.JoinRequest{
+	_, err := coord.Join(ctx, cluster.JoinRequest{
 		NodeID:        "node-1",
 		Role:          "search",
 		AdvertiseAddr: server.URL,
@@ -142,7 +142,7 @@ func TestIngestDocumentRoutesToPrimaryShard(t *testing.T) {
 		t.Fatalf("Join: %v", err)
 	}
 
-	if err := coord.Heartbeat(ctx, coordinator.HeartbeatRequest{
+	if err := coord.Heartbeat(ctx, cluster.HeartbeatRequest{
 		NodeID: "node-1",
 	}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
@@ -230,25 +230,25 @@ func TestIngestDocumentRequiresFields(t *testing.T) {
 	t.Parallel()
 
 	coord := newTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, clustersearch.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
 
 	ctx := context.Background()
-	_, err := coord.CreateIndex(ctx, coreindex.CreateIndexRequest{
+	_, err := coord.CreateIndex(ctx, indexes.CreateIndexRequest{
 		ID:               "idx-validate-required",
 		Name:             "validate-required",
 		DefaultAnalyzer:  "simple",
 		DefaultTokenizer: "whitespace",
-		FieldMappings: []coreindex.FieldMapping{
+		FieldMappings: []indexes.FieldMapping{
 			{
 				Name:     "message",
-				Type:     coreindex.FieldTypeText,
+				Type:     indexes.FieldTypeText,
 				Required: true,
 				Indexed:  true,
 			},
 		},
-		ShardConfig: coreindex.ShardConfig{
-			Strategy:  coreindex.ShardStrategyAutomatic,
-			Automatic: &coreindex.AutomaticShardConfig{ShardCount: 1},
+		ShardConfig: indexes.ShardConfig{
+			Strategy:  indexes.ShardStrategyAutomatic,
+			Automatic: &indexes.AutomaticShardConfig{ShardCount: 1},
 		},
 	})
 	if err != nil {
@@ -279,25 +279,25 @@ func TestIngestDocumentValidatesFieldTypes(t *testing.T) {
 	t.Parallel()
 
 	coord := newTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, clustersearch.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
 
 	ctx := context.Background()
-	_, err := coord.CreateIndex(ctx, coreindex.CreateIndexRequest{
+	_, err := coord.CreateIndex(ctx, indexes.CreateIndexRequest{
 		ID:               "idx-validate-types",
 		Name:             "validate-types",
 		DefaultAnalyzer:  "simple",
 		DefaultTokenizer: "whitespace",
-		FieldMappings: []coreindex.FieldMapping{
+		FieldMappings: []indexes.FieldMapping{
 			{
 				Name:     "attempts",
-				Type:     coreindex.FieldTypeInteger,
+				Type:     indexes.FieldTypeInteger,
 				Required: true,
 				Indexed:  true,
 			},
 		},
-		ShardConfig: coreindex.ShardConfig{
-			Strategy:  coreindex.ShardStrategyAutomatic,
-			Automatic: &coreindex.AutomaticShardConfig{ShardCount: 1},
+		ShardConfig: indexes.ShardConfig{
+			Strategy:  indexes.ShardStrategyAutomatic,
+			Automatic: &indexes.AutomaticShardConfig{ShardCount: 1},
 		},
 	})
 	if err != nil {
@@ -330,10 +330,10 @@ func TestListNodesEndpoint(t *testing.T) {
 	t.Parallel()
 
 	coord := newTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, clustersearch.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
 	ctx := context.Background()
 
-	_, err := coord.Join(ctx, coordinator.JoinRequest{
+	_, err := coord.Join(ctx, cluster.JoinRequest{
 		NodeID:        "node-admin",
 		Role:          "search",
 		AdvertiseAddr: "http://127.0.0.1:9000",
@@ -343,7 +343,7 @@ func TestListNodesEndpoint(t *testing.T) {
 		t.Fatalf("Join: %v", err)
 	}
 
-	if err := coord.Heartbeat(ctx, coordinator.HeartbeatRequest{
+	if err := coord.Heartbeat(ctx, cluster.HeartbeatRequest{
 		NodeID: "node-admin",
 	}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
@@ -389,18 +389,18 @@ func TestListIndexesEndpoint(t *testing.T) {
 	t.Parallel()
 
 	coord := newTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, clustersearch.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
 
 	ctx := context.Background()
-	_, err := coord.CreateIndex(ctx, coreindex.CreateIndexRequest{
+	_, err := coord.CreateIndex(ctx, indexes.CreateIndexRequest{
 		ID:               "idx-admin",
 		Name:             "admin",
 		DefaultAnalyzer:  "simple",
 		DefaultTokenizer: "whitespace",
-		FieldMappings: []coreindex.FieldMapping{
+		FieldMappings: []indexes.FieldMapping{
 			{
 				Name:      "title",
-				Type:      coreindex.FieldTypeText,
+				Type:      indexes.FieldTypeText,
 				Analyzer:  "simple",
 				Tokenizer: "whitespace",
 				Stored:    true,
@@ -408,9 +408,9 @@ func TestListIndexesEndpoint(t *testing.T) {
 				Indexed:   true,
 			},
 		},
-		ShardConfig: coreindex.ShardConfig{
-			Strategy: coreindex.ShardStrategyAutomatic,
-			Automatic: &coreindex.AutomaticShardConfig{
+		ShardConfig: indexes.ShardConfig{
+			Strategy: indexes.ShardStrategyAutomatic,
+			Automatic: &indexes.AutomaticShardConfig{
 				ShardCount: 1,
 			},
 		},
@@ -467,24 +467,24 @@ func TestGetIndexEndpoint(t *testing.T) {
 	t.Parallel()
 
 	coord := newTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, clustersearch.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
 
 	ctx := context.Background()
-	_, err := coord.CreateIndex(ctx, coreindex.CreateIndexRequest{
+	_, err := coord.CreateIndex(ctx, indexes.CreateIndexRequest{
 		ID:               "idx-detail",
 		Name:             "detail",
 		DefaultAnalyzer:  "simple",
 		DefaultTokenizer: "whitespace",
-		FieldMappings: []coreindex.FieldMapping{
+		FieldMappings: []indexes.FieldMapping{
 			{
 				Name:    "message",
-				Type:    coreindex.FieldTypeText,
+				Type:    indexes.FieldTypeText,
 				Indexed: true,
 			},
 		},
-		ShardConfig: coreindex.ShardConfig{
-			Strategy: coreindex.ShardStrategyAutomatic,
-			Automatic: &coreindex.AutomaticShardConfig{
+		ShardConfig: indexes.ShardConfig{
+			Strategy: indexes.ShardStrategyAutomatic,
+			Automatic: &indexes.AutomaticShardConfig{
 				ShardCount: 1,
 			},
 		},
@@ -517,8 +517,8 @@ func TestGetIndexEndpoint(t *testing.T) {
 	if index.Name != "detail" {
 		t.Fatalf("index name = %q, want %q", index.Name, "detail")
 	}
-	if index.ShardStrategy != "automatic" {
-		t.Fatalf("shard strategy = %q, want %q", index.ShardStrategy, "automatic")
+	if indexes.ShardStrategy != "automatic" {
+		t.Fatalf("shard strategy = %q, want %q", indexes.ShardStrategy, "automatic")
 	}
 }
 
@@ -526,24 +526,24 @@ func TestListShardsForIndexEndpoint(t *testing.T) {
 	t.Parallel()
 
 	coord := newTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, clustersearch.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
 
 	ctx := context.Background()
-	_, err := coord.CreateIndex(ctx, coreindex.CreateIndexRequest{
+	_, err := coord.CreateIndex(ctx, indexes.CreateIndexRequest{
 		ID:               "idx-shard",
 		Name:             "shard",
 		DefaultAnalyzer:  "simple",
 		DefaultTokenizer: "whitespace",
-		FieldMappings: []coreindex.FieldMapping{
+		FieldMappings: []indexes.FieldMapping{
 			{
 				Name:    "name",
-				Type:    coreindex.FieldTypeKeyword,
+				Type:    indexes.FieldTypeKeyword,
 				Indexed: true,
 			},
 		},
-		ShardConfig: coreindex.ShardConfig{
-			Strategy: coreindex.ShardStrategyAutomatic,
-			Automatic: &coreindex.AutomaticShardConfig{
+		ShardConfig: indexes.ShardConfig{
+			Strategy: indexes.ShardStrategyAutomatic,
+			Automatic: &indexes.AutomaticShardConfig{
 				ShardCount: 1,
 			},
 		},
@@ -583,11 +583,11 @@ func TestListShardsForIndexEndpoint(t *testing.T) {
 	}
 }
 
-func newTestCoordinator(t *testing.T) *coordinator.Coordinator {
+func newTestCoordinator(t *testing.T) *cluster.Coordinator {
 	t.Helper()
 
 	dbPath := filepath.Join(t.TempDir(), "coord.db")
-	coord, err := coordinator.NewCoordinator("coordinator", "0", dbPath)
+	coord, err := cluster.NewCoordinator("coordinator", "0", dbPath)
 	if err != nil {
 		t.Fatalf("NewCoordinator: %v", err)
 	}

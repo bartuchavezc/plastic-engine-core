@@ -12,12 +12,12 @@ import (
 	clusterindex "plastic-engine-core/internal/adapters/http/cluster/index"
 	clustermanagement "plastic-engine-core/internal/adapters/http/cluster/management"
 	clustersearchhttp "plastic-engine-core/internal/adapters/http/cluster/search"
-	coordinator "plastic-engine-core/internal/core/cluster/coordinator"
-	clustersearchsvc "plastic-engine-core/internal/core/cluster/search"
+	"plastic-engine-core/internal/core/cluster"
+	"plastic-engine-core/internal/core/cluster/nodes"
 )
 
 // NewRouter exposes coordinator cluster operations via HTTP.
-func NewRouter(coord *coordinator.Coordinator, joinService *clustersearchsvc.JoinService) http.Handler {
+func NewRouter(coord *cluster.Coordinator, joinService *cluster.JoinService) http.Handler {
 	r := chi.NewRouter()
 
 	clusterindex.Mount(r, coord)
@@ -36,11 +36,11 @@ func NewRouter(coord *coordinator.Coordinator, joinService *clustersearchsvc.Joi
 
 var membershipTracer = otel.Tracer("cluster/http/membership")
 
-func handleJoin(w http.ResponseWriter, r *http.Request, joinService *clustersearchsvc.JoinService) {
+func handleJoin(w http.ResponseWriter, r *http.Request, joinService *cluster.JoinService) {
 	ctx, span := membershipTracer.Start(r.Context(), "cluster.membership.join")
 	defer span.End()
 
-	var req coordinator.JoinRequest
+	var req cluster.JoinRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid join payload", http.StatusBadRequest)
 		return
@@ -63,11 +63,11 @@ func handleJoin(w http.ResponseWriter, r *http.Request, joinService *clustersear
 	}
 }
 
-func handleHeartbeat(w http.ResponseWriter, r *http.Request, joinService *clustersearchsvc.JoinService) {
+func handleHeartbeat(w http.ResponseWriter, r *http.Request, joinService *cluster.JoinService) {
 	ctx, span := membershipTracer.Start(r.Context(), "cluster.membership.heartbeat")
 	defer span.End()
 
-	var req coordinator.HeartbeatRequest
+	var req cluster.HeartbeatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid heartbeat payload", http.StatusBadRequest)
 		return

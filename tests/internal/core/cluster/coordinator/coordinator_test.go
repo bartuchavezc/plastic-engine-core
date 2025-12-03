@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	coordinator "plastic-engine-core/internal/core/cluster/coordinator"
-	coreindex "plastic-engine-core/internal/core/index"
+	"plastic-engine-core/internal/core/cluster"
+	indexes "plastic-engine-core/internal/core/cluster/indexes"
 )
 
 func TestStartHealthMonitorMarksStaleNodes(t *testing.T) {
@@ -17,7 +17,7 @@ func TestStartHealthMonitorMarksStaleNodes(t *testing.T) {
 
 	ctx := context.Background()
 
-	_, err := coord.Join(ctx, coordinator.JoinRequest{
+	_, err := coord.Join(ctx, cluster.JoinRequest{
 		NodeID:        "node-1",
 		Role:          "search",
 		AdvertiseAddr: "localhost:0",
@@ -27,7 +27,7 @@ func TestStartHealthMonitorMarksStaleNodes(t *testing.T) {
 		t.Fatalf("Join: %v", err)
 	}
 
-	if err := coord.Heartbeat(ctx, coordinator.HeartbeatRequest{
+	if err := coord.Heartbeat(ctx, cluster.HeartbeatRequest{
 		NodeID: "node-1",
 		Shards: nil,
 	}); err != nil {
@@ -57,7 +57,7 @@ func TestCreateIndexAssignsShardsToReadyNodes(t *testing.T) {
 
 	ctx := context.Background()
 
-	joinResp, err := coord.Join(ctx, coordinator.JoinRequest{
+	joinResp, err := coord.Join(ctx, cluster.JoinRequest{
 		NodeID:        "node-ready",
 		Role:          "search",
 		AdvertiseAddr: "localhost:0",
@@ -70,28 +70,28 @@ func TestCreateIndexAssignsShardsToReadyNodes(t *testing.T) {
 		t.Fatalf("expected no shards before index creation")
 	}
 
-	if err := coord.Heartbeat(ctx, coordinator.HeartbeatRequest{
+	if err := coord.Heartbeat(ctx, cluster.HeartbeatRequest{
 		NodeID: "node-ready",
 	}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
 
-	createResp, err := coord.CreateIndex(ctx, coreindex.CreateIndexRequest{
+	createResp, err := coord.CreateIndex(ctx, indexes.CreateIndexRequest{
 		ID:               "idx-metrics",
 		Name:             "metrics",
 		DefaultAnalyzer:  "simple",
 		DefaultTokenizer: "whitespace",
-		FieldMappings: []coreindex.FieldMapping{
+		FieldMappings: []indexes.FieldMapping{
 			{
 				Name:    "value",
-				Type:    coreindex.FieldTypeInteger,
+				Type:    indexes.FieldTypeInteger,
 				Stored:  true,
 				Indexed: false,
 			},
 		},
-		ShardConfig: coreindex.ShardConfig{
-			Strategy: coreindex.ShardStrategyAutomatic,
-			Automatic: &coreindex.AutomaticShardConfig{
+		ShardConfig: indexes.ShardConfig{
+			Strategy: indexes.ShardStrategyAutomatic,
+			Automatic: &indexes.AutomaticShardConfig{
 				ShardCount: 1,
 			},
 		},
@@ -123,22 +123,22 @@ func TestJoinAssignsPendingShards(t *testing.T) {
 	coord := newTestCoordinator(t)
 	ctx := context.Background()
 
-	_, err := coord.CreateIndex(ctx, coreindex.CreateIndexRequest{
+	_, err := coord.CreateIndex(ctx, indexes.CreateIndexRequest{
 		ID:               "idx-orders",
 		Name:             "orders",
 		DefaultAnalyzer:  "simple",
 		DefaultTokenizer: "whitespace",
-		FieldMappings: []coreindex.FieldMapping{
+		FieldMappings: []indexes.FieldMapping{
 			{
 				Name:     "order_id",
-				Type:     coreindex.FieldTypeKeyword,
+				Type:     indexes.FieldTypeKeyword,
 				Required: true,
 				Indexed:  true,
 			},
 		},
-		ShardConfig: coreindex.ShardConfig{
-			Strategy: coreindex.ShardStrategyAutomatic,
-			Automatic: &coreindex.AutomaticShardConfig{
+		ShardConfig: indexes.ShardConfig{
+			Strategy: indexes.ShardStrategyAutomatic,
+			Automatic: &indexes.AutomaticShardConfig{
 				ShardCount: 1,
 			},
 		},
@@ -147,7 +147,7 @@ func TestJoinAssignsPendingShards(t *testing.T) {
 		t.Fatalf("CreateIndex: %v", err)
 	}
 
-	resp, err := coord.Join(ctx, coordinator.JoinRequest{
+	resp, err := coord.Join(ctx, cluster.JoinRequest{
 		NodeID:        "node-assign",
 		Role:          "search",
 		AdvertiseAddr: "localhost:0",
@@ -168,7 +168,7 @@ func TestJoinReturnsExistingAssignments(t *testing.T) {
 	coord := newTestCoordinator(t)
 	ctx := context.Background()
 
-	initialResp, err := coord.Join(ctx, coordinator.JoinRequest{
+	initialResp, err := coord.Join(ctx, cluster.JoinRequest{
 		NodeID:        "node-rejoin",
 		Role:          "search",
 		AdvertiseAddr: "localhost:0",
@@ -181,27 +181,27 @@ func TestJoinReturnsExistingAssignments(t *testing.T) {
 		t.Fatalf("expected no shards on first join, got %d", len(initialResp.Shards))
 	}
 
-	if err := coord.Heartbeat(ctx, coordinator.HeartbeatRequest{
+	if err := coord.Heartbeat(ctx, cluster.HeartbeatRequest{
 		NodeID: "node-rejoin",
 	}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
 
-	_, err = coord.CreateIndex(ctx, coreindex.CreateIndexRequest{
+	_, err = coord.CreateIndex(ctx, indexes.CreateIndexRequest{
 		ID:               "idx-rejoin",
 		Name:             "rejoin",
 		DefaultAnalyzer:  "simple",
 		DefaultTokenizer: "whitespace",
-		FieldMappings: []coreindex.FieldMapping{
+		FieldMappings: []indexes.FieldMapping{
 			{
 				Name:    "description",
-				Type:    coreindex.FieldTypeText,
+				Type:    indexes.FieldTypeText,
 				Indexed: true,
 			},
 		},
-		ShardConfig: coreindex.ShardConfig{
-			Strategy: coreindex.ShardStrategyAutomatic,
-			Automatic: &coreindex.AutomaticShardConfig{
+		ShardConfig: indexes.ShardConfig{
+			Strategy: indexes.ShardStrategyAutomatic,
+			Automatic: &indexes.AutomaticShardConfig{
 				ShardCount: 1,
 			},
 		},
@@ -210,7 +210,7 @@ func TestJoinReturnsExistingAssignments(t *testing.T) {
 		t.Fatalf("CreateIndex: %v", err)
 	}
 
-	rejoinResp, err := coord.Join(ctx, coordinator.JoinRequest{
+	rejoinResp, err := coord.Join(ctx, cluster.JoinRequest{
 		NodeID:        "node-rejoin",
 		Role:          "search",
 		AdvertiseAddr: "localhost:0",
@@ -242,7 +242,7 @@ func TestJoinRequiresRole(t *testing.T) {
 	coord := newTestCoordinator(t)
 	ctx := context.Background()
 
-	if _, err := coord.Join(ctx, coordinator.JoinRequest{}); err == nil {
+	if _, err := coord.Join(ctx, cluster.JoinRequest{}); err == nil {
 		t.Fatalf("expected error for missing role")
 	}
 }
@@ -253,7 +253,7 @@ func TestHeartbeatUpdatesStatus(t *testing.T) {
 	coord := newTestCoordinator(t)
 	ctx := context.Background()
 
-	_, err := coord.Join(ctx, coordinator.JoinRequest{
+	_, err := coord.Join(ctx, cluster.JoinRequest{
 		NodeID:        "node-heartbeat",
 		Role:          "search",
 		AdvertiseAddr: "http://127.0.0.1:0",
@@ -262,7 +262,7 @@ func TestHeartbeatUpdatesStatus(t *testing.T) {
 		t.Fatalf("Join: %v", err)
 	}
 
-	if err := coord.Heartbeat(ctx, coordinator.HeartbeatRequest{NodeID: "node-heartbeat"}); err != nil {
+	if err := coord.Heartbeat(ctx, cluster.HeartbeatRequest{NodeID: "node-heartbeat"}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
 
@@ -279,7 +279,7 @@ func TestOpenMetadataDBInitializesSchema(t *testing.T) {
 	t.Parallel()
 
 	dbPath := filepath.Join(t.TempDir(), "schema.db")
-	db, err := coordinator.OpenMetadataDB(dbPath)
+	db, err := cluster.OpenMetadataDB(dbPath)
 	if err != nil {
 		t.Fatalf("OpenMetadataDB: %v", err)
 	}
@@ -294,11 +294,11 @@ func TestOpenMetadataDBInitializesSchema(t *testing.T) {
 	}
 }
 
-func newTestCoordinator(t *testing.T) *coordinator.Coordinator {
+func newTestCoordinator(t *testing.T) *cluster.Coordinator {
 	t.Helper()
 
 	dbPath := filepath.Join(t.TempDir(), "coord.db")
-	coord, err := coordinator.NewCoordinator("coordinator", "0", dbPath)
+	coord, err := cluster.NewCoordinator("coordinator", "0", dbPath)
 	if err != nil {
 		t.Fatalf("NewCoordinator: %v", err)
 	}
