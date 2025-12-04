@@ -125,6 +125,48 @@ func (c NgramConfig) Validate() error {
 	return nil
 }
 
+// HydrationConfig defines how documents are retrieved from external storage.
+type HydrationConfig struct {
+	Enabled   bool              `json:"enabled"`
+	Connector string            `json:"connector"`  // "internal", "http", "mongodb", "s3"
+	KeyField  string            `json:"key_field"`  // Field to use as lookup key
+	Settings  map[string]string `json:"settings"`   // Connector-specific settings
+}
+
+// DefaultHydrationConfig returns a disabled hydration config.
+func DefaultHydrationConfig() HydrationConfig {
+	return HydrationConfig{
+		Enabled:   false,
+		Connector: "",
+		KeyField:  "_id",
+		Settings:  nil,
+	}
+}
+
+// InternalHydrationConfig returns config for internal connector.
+func InternalHydrationConfig() HydrationConfig {
+	return HydrationConfig{
+		Enabled:   true,
+		Connector: "internal",
+		KeyField:  "_id",
+		Settings:  nil,
+	}
+}
+
+// Validate ensures the hydration configuration is valid.
+func (c HydrationConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.Connector == "" {
+		return NewValidationError("hydration connector is required when enabled")
+	}
+	if c.KeyField == "" {
+		return NewValidationError("hydration key_field is required")
+	}
+	return nil
+}
+
 // IndexDefinition captures the full set of configuration for an index.
 type IndexDefinition struct {
 	ID               string
@@ -137,6 +179,7 @@ type IndexDefinition struct {
 	FieldMappings    []FieldMapping
 	MappingVersion   int
 	NgramConfig      NgramConfig
+	HydrationConfig  HydrationConfig
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }
@@ -152,7 +195,8 @@ type CreateIndexRequest struct {
 	DefaultTokenizer string
 	FieldMappings    []FieldMapping
 	MappingVersion   int
-	NgramConfig      *NgramConfig // nil means use default
+	NgramConfig      *NgramConfig      // nil means use default
+	HydrationConfig  *HydrationConfig  // nil means disabled
 	InitialShardKeys []string
 }
 
