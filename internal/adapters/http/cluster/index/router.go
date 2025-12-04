@@ -193,6 +193,11 @@ func (h *handler) handleCreateIndex(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.coord.CreateIndex(ctx, req)
 	if err != nil {
+		// Check for Raft not-leader error first
+		if clusterhttputil.HandleNotLeaderError(w, err) {
+			return
+		}
+
 		switch {
 		case errors.Is(err, indexes.ErrIndexIDExists),
 			errors.Is(err, indexes.ErrIndexNameExists):

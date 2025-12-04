@@ -11,6 +11,10 @@ import (
 
 // OpenMetadataDB opens (or creates) the SQLite database that stores cluster metadata.
 // An empty path defaults to a local "cluster.db" file.
+//
+// The database is configured with WAL mode for better concurrent read performance
+// while maintaining write consistency. This allows multiple readers while a single
+// writer is active.
 func OpenMetadataDB(path string) (*sql.DB, error) {
 	if path == "" {
 		path = "cluster.db"
@@ -21,13 +25,35 @@ func OpenMetadataDB(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
 
-	// SQLite works better with a single writer in our use-case.
-	db.SetMaxOpenConns(1)
+	// Configure connection pool:
+	// - MaxOpenConns allows concurrent readers with WAL mode
+	// - Single writer is still enforced by SQLite internally
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
 	db.SetConnMaxIdleTime(5 * time.Minute)
 
-	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+	// Enable WAL mode for better concurrent read performance.
+	// WAL allows readers to proceed without blocking on writers.
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("enable sqlite foreign_keys: %w", err)
+		return nil, fmt.Errorf("enable sqlite WAL mode: %w", err)
+	}
+
+	// Performance tuning pragmas:
+	// - synchronous=NORMAL: Balance between durability and speed (WAL mode safe)
+	// - cache_size: 64MB of cache for better read performance
+	// - busy_timeout: Wait up to 5 seconds for locks instead of failing immediately
+	pragmas := []string{
+		`PRAGMA foreign_keys = ON`,
+		`PRAGMA synchronous = NORMAL`,
+		`PRAGMA cache_size = -64000`,
+		`PRAGMA busy_timeout = 5000`,
+	}
+	for _, pragma := range pragmas {
+		if _, err := db.Exec(pragma); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("execute pragma %q: %w", pragma, err)
+		}
 	}
 
 	if err := initializeCoordinatorSchema(db); err != nil {

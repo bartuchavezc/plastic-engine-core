@@ -23,10 +23,10 @@ func NewRepository(db *sql.DB) *Repository {
 
 // CreateIndex stores a new index definition and associated field mappings.
 func (r *Repository) CreateIndex(ctx context.Context, req CreateIndexRequest) (CreateIndexResponse, error) {
-	normalizeShardConfig(&req.ShardConfig, req.ShardStrategy)
+	NormalizeShardConfig(&req.ShardConfig, req.ShardStrategy)
 	req.ShardStrategy = req.ShardConfig.Strategy
 
-	if err := validateCreateRequest(req); err != nil {
+	if err := ValidateCreateRequest(req); err != nil {
 		return CreateIndexResponse{}, err
 	}
 
@@ -390,7 +390,9 @@ func (r *Repository) ListShardsForNode(ctx context.Context, nodeID string) ([]Sh
 	return shards, nil
 }
 
-func validateCreateRequest(req CreateIndexRequest) error {
+// ValidateCreateRequest validates the fields of a CreateIndexRequest.
+// This is exported so it can be used by the Coordinator before creating commands.
+func ValidateCreateRequest(req CreateIndexRequest) error {
 	switch {
 	case strings.TrimSpace(req.ID) == "":
 		return NewValidationError("index id is required")
@@ -476,7 +478,9 @@ func validateCreateRequest(req CreateIndexRequest) error {
 	return nil
 }
 
-func normalizeShardConfig(cfg *ShardConfig, fallback ShardStrategy) {
+// NormalizeShardConfig applies default values to a shard configuration.
+// This should be called before validation to ensure required fields are set.
+func NormalizeShardConfig(cfg *ShardConfig, fallback ShardStrategy) {
 	if cfg == nil {
 		return
 	}
@@ -541,7 +545,7 @@ func decodeShardConfigInto(def *IndexDefinition, raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		cfg := ShardConfig{Strategy: def.ShardStrategy}
-		normalizeShardConfig(&cfg, def.ShardStrategy)
+		NormalizeShardConfig(&cfg, def.ShardStrategy)
 		def.ShardConfig = cfg
 		return nil
 	}
@@ -550,7 +554,7 @@ func decodeShardConfigInto(def *IndexDefinition, raw string) error {
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		return fmt.Errorf("unmarshal shard config: %w", err)
 	}
-	normalizeShardConfig(&cfg, cfg.Strategy)
+	NormalizeShardConfig(&cfg, cfg.Strategy)
 	def.ShardConfig = cfg
 	def.ShardStrategy = cfg.Strategy
 	return nil

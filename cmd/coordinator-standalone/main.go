@@ -1,19 +1,13 @@
-// coordinator is a high-availability coordinator that uses Raft for consensus.
-// Use this for production clusters where you need fault tolerance and consistency
-// across multiple coordinator nodes.
+// coordinator-standalone is a single-node coordinator that writes directly to SQLite.
+// Use this for development, testing, or single-node deployments where high availability
+// is not required.
 //
-// For development or single-node deployments, consider using coordinator-standalone
-// which writes directly to SQLite without Raft overhead.
+// For production clusters with multiple coordinators, use the main coordinator binary
+// which uses Raft for consensus.
 //
 // Environment variables:
 //   - PORT: HTTP port (default: 8080)
 //   - DB_PATH: Path to SQLite database (default: cluster.db)
-//   - RAFT_PORT: Raft consensus port (default: 7000)
-//   - RAFT_DATA_DIR: Directory for Raft logs and snapshots (default: ./raft-data)
-//   - RAFT_NODE_ID: Unique node identifier (default: hostname)
-//   - RAFT_ADVERTISE_ADDR: Address advertised to other nodes
-//   - RAFT_PEERS: Comma-separated list of peer addresses (e.g., "host1:7000,host2:7000")
-//   - RAFT_BOOTSTRAP: Set to "true" to bootstrap a new cluster (only for first node)
 //   - OTEL_EXPORTER_OTLP_ENDPOINT: OpenTelemetry collector endpoint
 //   - ENABLE_PROMETHEUS: Enable Prometheus metrics (default: true)
 //   - METRICS_PORT: Prometheus metrics port (default: 9090)
@@ -21,7 +15,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -37,11 +30,10 @@ import (
 	"plastic-engine-core/internal/adapters/telemetry/tracing"
 	"plastic-engine-core/internal/core/cluster"
 	"plastic-engine-core/internal/core/cluster/nodes"
-	"plastic-engine-core/internal/core/cluster/raft"
 	"plastic-engine-core/internal/pkg/logger"
 )
 
-const serviceName = "coordinator"
+const serviceName = "coordinator-standalone"
 
 func main() {
 	log := logger.DefaultLogger()
@@ -95,45 +87,24 @@ func main() {
 		}
 	}()
 
-	// Open the metadata database
-	db, err := cluster.OpenMetadataDB(dbPath)
-	if err != nil {
-		log.Error("failed to open metadata database", logger.Field{Key: "error", Value: err})
-		os.Exit(1)
-	}
-	defer db.Close()
-
-	// Initialize Raft node
-	raftCfg := raft.ConfigFromEnv()
-	log.Info("initializing raft node",
-		logger.Field{Key: "node_id", Value: raftCfg.NodeID},
-		logger.Field{Key: "bind_addr", Value: raftCfg.BindAddr},
-		logger.Field{Key: "data_dir", Value: raftCfg.DataDir},
-		logger.Field{Key: "bootstrap", Value: raftCfg.Bootstrap},
-		logger.Field{Key: "peers", Value: raftCfg.Peers},
-	)
-
-	raftNode, err := raft.NewNode(raftCfg, db, log)
-	if err != nil {
-		log.Error("failed to initialize raft node", logger.Field{Key: "error", Value: err})
-		os.Exit(1)
-	}
-	defer func() {
-		if err := raftNode.Shutdown(); err != nil {
-			log.Error("error shutting down raft node", logger.Field{Key: "error", Value: err})
-		}
-	}()
-
-	// Create Raft applier
-	raftApplier := raft.NewApplier(raftNode, raft.DefaultApplierConfig(), log)
-
-	// Initialize coordinator with Raft applier
-	coord, err := cluster.NewCoordinatorWithDeps(db, raftApplier, log)
+	// Initialize coordinator with LocalApplier (standalone mode)
+	// The LocalApplier writes directly to SQLite without Raft consensus
+	coord, err := cluster.NewCoordinatorWithConfig(cluster.CoordinatorConfig{
+		Role:   "coordinator",
+		Port:   port,
+		DBPath: dbPath,
+		Logger: log,
+		// Applier is nil, so NewCoordinatorWithConfig will create a LocalApplier
+	})
 	if err != nil {
 		log.Error("failed to initialise coordinator", logger.Field{Key: "error", Value: err})
 		os.Exit(1)
 	}
-	// Note: Don't close coordinator's DB since we manage it separately
+	defer func() {
+		if err := coord.Close(); err != nil {
+			log.Error("error closing coordinator", logger.Field{Key: "error", Value: err})
+		}
+	}()
 
 	// Build router with observability middleware
 	joinService := nodes.NewJoinService(coord.NodesService())
@@ -147,7 +118,7 @@ func main() {
 		ServiceName: serviceName,
 		Logger:      log,
 		Metrics:     metricsProvider,
-		SkipPaths:   []string{"/health", "/ready", "/metrics", "/raft/status"},
+		SkipPaths:   []string{"/health", "/ready", "/metrics"},
 	}))
 	r.Mount("/", baseRouter)
 
@@ -157,41 +128,8 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 	r.Get("/ready", func(w http.ResponseWriter, r *http.Request) {
-		// Ready only if we have a leader
-		if raftNode.LeaderAddr() == "" {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte("no leader"))
-			return
-		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready"))
-	})
-
-	// Add Raft status endpoint
-	r.Get("/raft/status", func(w http.ResponseWriter, r *http.Request) {
-		stats := raftNode.Stats()
-		config, _ := raftNode.GetConfiguration()
-
-		servers := make([]map[string]string, len(config.Servers))
-		for i, srv := range config.Servers {
-			servers[i] = map[string]string{
-				"id":      string(srv.ID),
-				"address": string(srv.Address),
-			}
-		}
-
-		status := map[string]interface{}{
-			"node_id":     raftNode.NodeID(),
-			"state":       raftNode.State().String(),
-			"is_leader":   raftNode.IsLeader(),
-			"leader_addr": raftNode.LeaderAddr(),
-			"leader_id":   raftNode.LeaderID(),
-			"servers":     servers,
-			"stats":       stats,
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(status)
 	})
 
 	server := &http.Server{
@@ -207,34 +145,11 @@ func main() {
 
 	coord.StartHealthMonitor(signalCtx, 5*time.Second, 15*time.Second)
 
-	// Watch for leadership changes
 	go func() {
-		leaderCh := raftNode.LeaderCh()
-		for {
-			select {
-			case isLeader := <-leaderCh:
-				if isLeader {
-					log.Info("this node is now the leader",
-						logger.Field{Key: "node_id", Value: raftNode.NodeID()},
-					)
-				} else {
-					log.Info("this node is no longer the leader",
-						logger.Field{Key: "node_id", Value: raftNode.NodeID()},
-						logger.Field{Key: "new_leader", Value: raftNode.LeaderAddr()},
-					)
-				}
-			case <-signalCtx.Done():
-				return
-			}
-		}
-	}()
-
-	go func() {
-		log.Info("coordinator listening",
+		log.Info("coordinator-standalone listening",
 			logger.Field{Key: "addr", Value: server.Addr},
-			logger.Field{Key: "raft_addr", Value: raftCfg.BindAddr},
-			logger.Field{Key: "mode", Value: "raft"},
-			logger.Field{Key: "node_id", Value: raftCfg.NodeID},
+			logger.Field{Key: "db_path", Value: dbPath},
+			logger.Field{Key: "mode", Value: "standalone"},
 			logger.Field{Key: "metrics_enabled", Value: os.Getenv("ENABLE_PROMETHEUS") != "false"},
 		)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -244,7 +159,7 @@ func main() {
 	}()
 
 	<-signalCtx.Done()
-	log.Info("shutting down coordinator")
+	log.Info("shutting down coordinator-standalone")
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
@@ -253,3 +168,4 @@ func main() {
 		log.Error("error shutting down server", logger.Field{Key: "error", Value: err})
 	}
 }
+

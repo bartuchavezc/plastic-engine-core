@@ -33,7 +33,30 @@ func NewService(db *sql.DB, log logger.Logger) *Service {
 	}
 }
 
+// PlanShardKeys computes the shard keys for an index definition without persisting them.
+// This is useful when shard creation is handled by a StateApplier.
+func (s *Service) PlanShardKeys(def indexes.IndexDefinition) []string {
+	planner, err := s.plannerFactory.Get(def.ShardStrategy)
+	if err != nil {
+		s.log.Error("failed to get shard planner", logger.Field{Key: "error", Value: err})
+		return nil
+	}
+
+	specs, err := planner.PlanInitialShards(context.Background(), def, nil)
+	if err != nil {
+		s.log.Error("failed to plan initial shards", logger.Field{Key: "error", Value: err})
+		return nil
+	}
+
+	keys := make([]string, len(specs))
+	for i, spec := range specs {
+		keys[i] = spec.Key
+	}
+	return keys
+}
+
 // PlanInitial creates the initial shards for an index definition.
+// Deprecated: Use PlanShardKeys with StateApplier for new code.
 func (s *Service) PlanInitial(ctx context.Context, def indexes.IndexDefinition) error {
 	planner, err := s.plannerFactory.Get(def.ShardStrategy)
 	if err != nil {
