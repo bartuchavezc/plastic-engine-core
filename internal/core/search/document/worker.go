@@ -139,7 +139,17 @@ func (w *ShardWorker) process(item WorkItem) {
 		return
 	}
 
-	req := w.prepareWrite(item.Command, plans)
+	// Get n-gram config from index definition
+	ngramConfig := DefaultNgramConfig()
+	if indexDef.NgramConfig.MaxLength > 0 {
+		ngramConfig = NgramConfig{
+			Enabled:   indexDef.NgramConfig.Enabled,
+			MinLength: indexDef.NgramConfig.MinLength,
+			MaxLength: indexDef.NgramConfig.MaxLength,
+		}
+	}
+
+	req := w.prepareWrite(item.Command, plans, ngramConfig)
 	if err := w.writer.Index(ctx, req); err != nil {
 		w.log.Error("failed to persist document",
 			logger.Field{Key: "shard_id", Value: w.shardID},
@@ -159,7 +169,7 @@ func (w *ShardWorker) process(item WorkItem) {
 	_ = assignment // placeholder to avoid unused variable (future metrics)
 }
 
-func (w *ShardWorker) prepareWrite(cmd Command, plans []FieldPlan) DocumentWriteRequest {
+func (w *ShardWorker) prepareWrite(cmd Command, plans []FieldPlan, ngramConfig NgramConfig) DocumentWriteRequest {
 	fieldResults := make([]FieldTerms, 0, len(plans))
 
 	for _, plan := range plans {
@@ -188,7 +198,8 @@ func (w *ShardWorker) prepareWrite(cmd Command, plans []FieldPlan) DocumentWrite
 	}
 
 	return DocumentWriteRequest{
-		DocumentID: cmd.DocumentID,
-		Fields:     fieldResults,
+		DocumentID:  cmd.DocumentID,
+		Fields:      fieldResults,
+		NgramConfig: ngramConfig,
 	}
 }

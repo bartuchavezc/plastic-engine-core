@@ -31,10 +31,17 @@ func TestServiceIndexPersistsDocument(t *testing.T) {
 		t.Fatalf("Index: %v", err)
 	}
 
+	// Wait for forward index to be written (async worker)
 	requireEventually(t, 500*time.Millisecond, func() bool {
-		_, err := store.Get("inv:title:hello:doc-1")
+		_, err := store.Get("fwd:doc-1")
 		return err == nil
 	})
+
+	// Verify term registry was created
+	_, err := store.Get(pebble.TermRegistryKey("title", "hello"))
+	if err != nil {
+		t.Fatalf("expected term registry entry, got %v", err)
+	}
 }
 
 func TestServiceIndexValidation(t *testing.T) {

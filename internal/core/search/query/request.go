@@ -37,9 +37,10 @@ func (e *ValidationError) Error() string {
 
 // Clause represents a logical unit in the query tree.
 type Clause struct {
-	Term  *TermQuery  `json:"term,omitempty"`
-	Match *MatchQuery `json:"match,omitempty"`
-	Range *RangeQuery `json:"range,omitempty"`
+	Term   *TermQuery   `json:"term,omitempty"`
+	Match  *MatchQuery  `json:"match,omitempty"`
+	Range  *RangeQuery  `json:"range,omitempty"`
+	Prefix *PrefixQuery `json:"prefix,omitempty"`
 }
 
 // TermQuery matches documents whose field exactly equals the provided value.
@@ -62,6 +63,14 @@ type RangeQuery struct {
 	GT    any    `json:"gt,omitempty"`
 	LTE   any    `json:"lte,omitempty"`
 	LT    any    `json:"lt,omitempty"`
+}
+
+// PrefixQuery matches documents whose field starts with the given prefix.
+// Uses edge n-grams for efficient prefix matching.
+type PrefixQuery struct {
+	Field string  `json:"field"`
+	Value string  `json:"value"`
+	Boost float64 `json:"boost,omitempty"`
 }
 
 // Normalize prepares the request by trimming whitespace, applying defaults and
@@ -152,6 +161,15 @@ func (c *Clause) normalize(allowMatch bool) error {
 	if c.Range != nil {
 		return c.Range.normalize()
 	}
+	if c.Prefix != nil {
+		if !allowMatch {
+			return &ValidationError{
+				Field:   "clause.prefix",
+				Message: "prefix operator is not allowed in this context",
+			}
+		}
+		return c.Prefix.normalize()
+	}
 
 	return nil
 }
@@ -184,6 +202,14 @@ func (c Clause) validate(allowMatch bool, fieldPrefix string) error {
 		return c.Match.validate(fieldPrefix + ".match")
 	case c.Range != nil:
 		return c.Range.validate(fieldPrefix + ".range")
+	case c.Prefix != nil:
+		if !allowMatch {
+			return &ValidationError{
+				Field:   fieldPrefix + ".prefix",
+				Message: "prefix operator is not allowed here",
+			}
+		}
+		return c.Prefix.validate(fieldPrefix + ".prefix")
 	default:
 		// Should be unreachable because populated() already guards this, but keep defensive.
 		return &ValidationError{
@@ -202,6 +228,9 @@ func (c Clause) populated() int {
 		count++
 	}
 	if c.Range != nil {
+		count++
+	}
+	if c.Prefix != nil {
 		count++
 	}
 	return count
@@ -349,4 +378,49 @@ func parseBoostedField(raw string) (string, float64, error) {
 	}
 
 	return field, value, nil
+}
+
+func (p *PrefixQuery) normalize() error {
+	field, boost, err := parseBoostedField(p.Field)
+	if err != nil {
+		return err
+	}
+	p.Field = field
+
+	p.Value = strings.TrimSpace(p.Value)
+	p.Value = strings.ToLower(p.Value) // Normalize to lowercase for prefix matching
+
+	if p.Boost <= 0 {
+		if boost > 0 {
+			p.Boost = boost
+		} else {
+			p.Boost = 1
+		}
+	} else if boost > 0 {
+		p.Boost *= boost
+	}
+
+	return nil
+}
+
+func (p PrefixQuery) validate(fieldPrefix string) error {
+	if p.Field == "" {
+		return &ValidationError{
+			Field:   fieldPrefix + ".field",
+			Message: "field is required",
+		}
+	}
+	if p.Value == "" {
+		return &ValidationError{
+			Field:   fieldPrefix + ".value",
+			Message: "prefix value is required",
+		}
+	}
+	if p.Boost <= 0 {
+		return &ValidationError{
+			Field:   fieldPrefix + ".boost",
+			Message: "boost must be greater than zero",
+		}
+	}
+	return nil
 }

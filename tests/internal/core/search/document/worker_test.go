@@ -64,8 +64,9 @@ func TestShardWorkerProcessesDocument(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
+	// Wait for forward index to be written (async worker)
 	requireEventually(t, 500*time.Millisecond, func() bool {
-		_, err := store.Get("inv:title:hello:doc-1")
+		_, err := store.Get("fwd:doc-1")
 		return err == nil
 	})
 }

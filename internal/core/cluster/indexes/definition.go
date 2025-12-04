@@ -92,6 +92,39 @@ const (
 	ComputedTransformSlug ComputedTransform = "slug"
 )
 
+// NgramConfig defines the parameters for edge n-gram generation.
+type NgramConfig struct {
+	Enabled   bool `json:"enabled"`
+	MinLength int  `json:"min_length"`
+	MaxLength int  `json:"max_length"`
+}
+
+// DefaultNgramConfig returns the default n-gram configuration.
+func DefaultNgramConfig() NgramConfig {
+	return NgramConfig{
+		Enabled:   true,
+		MinLength: 5,
+		MaxLength: 10,
+	}
+}
+
+// Validate ensures the n-gram configuration is valid.
+func (c NgramConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.MinLength < 1 {
+		return NewValidationError("ngram min_length must be at least 1")
+	}
+	if c.MaxLength < c.MinLength {
+		return NewValidationError("ngram max_length must be >= min_length")
+	}
+	if c.MaxLength > 50 {
+		return NewValidationError("ngram max_length cannot exceed 50")
+	}
+	return nil
+}
+
 // IndexDefinition captures the full set of configuration for an index.
 type IndexDefinition struct {
 	ID               string
@@ -103,6 +136,7 @@ type IndexDefinition struct {
 	DefaultTokenizer string
 	FieldMappings    []FieldMapping
 	MappingVersion   int
+	NgramConfig      NgramConfig
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }
@@ -118,6 +152,7 @@ type CreateIndexRequest struct {
 	DefaultTokenizer string
 	FieldMappings    []FieldMapping
 	MappingVersion   int
+	NgramConfig      *NgramConfig // nil means use default
 	InitialShardKeys []string
 }
 
