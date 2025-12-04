@@ -1,4 +1,4 @@
-package cluster
+package documents
 
 import (
 	"bytes"
@@ -11,66 +11,65 @@ import (
 	"net/http"
 	"strings"
 
-	"plastic-engine-core/internal/core/cluster/shards"
-	indexes "plastic-engine-core/internal/core/cluster/indexes"
-	"plastic-engine-core/internal/core/cluster/indexes/sharding"
-	"plastic-engine-core/internal/pkg/logger"
-
 	"go.opentelemetry.io/otel"
+
+	"plastic-engine-core/internal/core/cluster/indexes"
+	"plastic-engine-core/internal/core/cluster/indexes/sharding"
+	"plastic-engine-core/internal/core/cluster/shards"
+	"plastic-engine-core/internal/pkg/logger"
 )
-
-// Request represents an ingestion command accepted by the cluster.
-type Request struct {
-	IndexID    string
-	DocumentID string
-	Routing    map[string]string
-	Payload    json.RawMessage
-}
-
-// ErrShardNotFound signals the coordinator could not route the document.
-var ErrShardNotFound = errors.New("shard not found for routing metadata")
-
-// Handler encapsulates the dependencies required to execute the ingestion workflow.
-type Handler struct {
-	IndexRepo  IndexRepository
-	DB         *sql.DB
-	HTTPClient *http.Client
-	Logger     logger.Logger
-}
 
 // IndexRepository resolves index definitions.
 type IndexRepository interface {
 	GetIndex(ctx context.Context, id string) (indexes.IndexDefinition, error)
 }
 
-// Handle executes the ingestion pipeline using the coordinator's collaborators.
-func (h *Handler) Handle(ctx context.Context, req Request) error {
-	ctx, span := otel.Tracer("cluster.ingest").Start(ctx, "Coordinator.IngestDocument")
+// Router encapsulates the dependencies required to execute the ingestion workflow.
+type Router struct {
+	IndexRepo  IndexRepository
+	ShardRepo  *shards.Repository
+	HTTPClient *http.Client
+	Logger     logger.Logger
+}
+
+// NewRouter creates a document router.
+func NewRouter(db *sql.DB, indexRepo IndexRepository, httpClient *http.Client, log logger.Logger) *Router {
+	if log == nil {
+		log = logger.DefaultLogger()
+	}
+	return &Router{
+		IndexRepo:  indexRepo,
+		ShardRepo:  shards.NewRepository(db),
+		HTTPClient: httpClient,
+		Logger:     log,
+	}
+}
+
+// Handle executes the ingestion pipeline by routing the document to the appropriate shard.
+func (r *Router) Handle(ctx context.Context, req Request) error {
+	ctx, span := otel.Tracer("cluster.documents").Start(ctx, "Router.Handle")
 	defer span.End()
 
-	if h.IndexRepo == nil {
-		return fmt.Errorf("ingest handler missing index repository")
+	if r.IndexRepo == nil {
+		return fmt.Errorf("document router missing index repository")
 	}
-	if h.DB == nil {
-		return fmt.Errorf("ingest handler missing database handle")
+	if r.ShardRepo == nil {
+		return fmt.Errorf("document router missing shard repository")
 	}
-	if h.HTTPClient == nil {
-		return fmt.Errorf("ingest handler missing http client")
-	}
-	if h.Logger == nil {
-		h.Logger = logger.DefaultLogger()
+	if r.HTTPClient == nil {
+		return fmt.Errorf("document router missing http client")
 	}
 
 	if err := validateRequest(req); err != nil {
 		return err
 	}
 
-	def, err := h.IndexRepo.GetIndex(ctx, req.IndexID)
+	def, err := r.IndexRepo.GetIndex(ctx, req.IndexID)
 	if err != nil {
 		return err
 	}
 
-	normalizedPayload, err := normalizeDocumentPayload(def, req.Payload)
+	normalizedPayload, err := NormalizePayload(def, req.Payload)
 	if err != nil {
 		return err
 	}
@@ -80,7 +79,7 @@ func (h *Handler) Handle(ctx context.Context, req Request) error {
 		return err
 	}
 
-	shard, err := shards.LookupPrimaryShard(ctx, h.DB, req.IndexID, shardKey)
+	shardInfo, err := r.ShardRepo.LookupPrimaryShard(ctx, req.IndexID, shardKey)
 	if err != nil {
 		if errors.Is(err, shards.ErrPrimaryNotFound) {
 			return ErrShardNotFound
@@ -88,7 +87,7 @@ func (h *Handler) Handle(ctx context.Context, req Request) error {
 		return err
 	}
 
-	nodeInfo, err := shards.LookupNode(ctx, h.DB, shard.PrimaryNode)
+	nodeInfo, err := r.ShardRepo.LookupNode(ctx, shardInfo.PrimaryNode)
 	if err != nil {
 		return err
 	}
@@ -99,7 +98,7 @@ func (h *Handler) Handle(ctx context.Context, req Request) error {
 
 	forwardPayload := map[string]any{
 		"index_id":    req.IndexID,
-		"shard_id":    shard.ID,
+		"shard_id":    shardInfo.ID,
 		"document_id": req.DocumentID,
 		"routing":     req.Routing,
 		"payload":     normalizedPayload,
@@ -116,7 +115,7 @@ func (h *Handler) Handle(ctx context.Context, req Request) error {
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := h.HTTPClient.Do(httpReq)
+	resp, err := r.HTTPClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("forward document to node %s: %w", nodeInfo.ID, err)
 	}
@@ -127,9 +126,9 @@ func (h *Handler) Handle(ctx context.Context, req Request) error {
 		return fmt.Errorf("node %s returned %d: %s", nodeInfo.ID, resp.StatusCode, string(slurp))
 	}
 
-	h.Logger.Info("document forwarded",
+	r.Logger.Info("document forwarded",
 		logger.Field{Key: "index_id", Value: req.IndexID},
-		logger.Field{Key: "shard_id", Value: shard.ID},
+		logger.Field{Key: "shard_id", Value: shardInfo.ID},
 		logger.Field{Key: "node_id", Value: nodeInfo.ID},
 	)
 
@@ -145,3 +144,4 @@ func validateRequest(req Request) error {
 	}
 	return nil
 }
+

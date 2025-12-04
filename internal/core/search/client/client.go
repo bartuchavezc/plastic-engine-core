@@ -14,7 +14,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
 
-	"plastic-engine-core/internal/core/cluster"
+	"plastic-engine-core/internal/core/cluster/nodes"
 	node "plastic-engine-core/internal/core/search"
 )
 
@@ -50,14 +50,14 @@ func (c *Client) Join(ctx context.Context, info node.NodeInfo) (node.JoinRespons
 	ctx, span := tracer.Start(ctx, "ClusterClient.Join")
 	defer span.End()
 
-	payload := cluster.JoinRequest{
+	payload := nodes.JoinRequest{
 		NodeID:        info.ID,
 		Role:          info.Role,
 		AdvertiseAddr: info.AdvertiseAddr,
 		DataDir:       info.DataDir,
 	}
 
-	var response cluster.JoinResponse
+	var response nodes.JoinResponse
 	if err := c.postJSON(ctx, defaultJoinPath, payload, &response); err != nil {
 		return node.JoinResponse{}, fmt.Errorf("join coordinator: %w", err)
 	}
@@ -78,7 +78,7 @@ func (c *Client) Heartbeat(ctx context.Context, report node.HeartbeatReport) err
 	ctx, span := tracer.Start(ctx, "ClusterClient.Heartbeat")
 	defer span.End()
 
-	payload := cluster.HeartbeatRequest{
+	payload := nodes.HeartbeatRequest{
 		NodeID: report.NodeID,
 		Shards: report.Shards,
 	}

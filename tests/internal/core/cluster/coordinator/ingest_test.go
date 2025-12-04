@@ -13,30 +13,32 @@ import (
 	"time"
 
 	"plastic-engine-core/internal/core/cluster"
+	"plastic-engine-core/internal/core/cluster/documents"
 	indexes "plastic-engine-core/internal/core/cluster/indexes"
 	"plastic-engine-core/internal/pkg/logger"
 )
 
-func TestHandlerReturnsShardNotFound(t *testing.T) {
-	handler := cluster.Handler{
-		IndexRepo:  &staticIndexRepo{},
-		DB:         openTestDB(t),
-		HTTPClient: http.DefaultClient,
-	}
+func TestRouterReturnsShardNotFound(t *testing.T) {
+	router := documents.NewRouter(
+		openTestDB(t),
+		&staticIndexRepo{},
+		http.DefaultClient,
+		logger.DefaultLogger(),
+	)
 
-	req := cluster.Request{
+	req := documents.Request{
 		IndexID:    "idx-test",
 		DocumentID: "doc-1",
 		Payload:    json.RawMessage(`{"title":"hello","attempts":"5","created_at":"2006-01-02T15:04:05Z"}`),
 	}
 
-	err := handler.Handle(context.Background(), req)
-	if err == nil || !errors.Is(err, cluster.ErrShardNotFound) {
+	err := router.Handle(context.Background(), req)
+	if err == nil || !errors.Is(err, documents.ErrShardNotFound) {
 		t.Fatalf("expected ErrShardNotFound, got %v", err)
 	}
 }
 
-func TestHandlerForwardsDocument(t *testing.T) {
+func TestRouterForwardsDocument(t *testing.T) {
 	db := openTestDB(t)
 	seedIndexRow(t, db, "idx-test")
 	var capturedBody []byte
@@ -51,20 +53,20 @@ func TestHandlerForwardsDocument(t *testing.T) {
 	seedNode(t, db, "node-1", server.URL)
 	seedShard(t, db, "idx-test", "idx-test-default", "node-1")
 
-	handler := cluster.Handler{
-		IndexRepo:  &staticIndexRepo{},
-		DB:         db,
-		HTTPClient: server.Client(),
-		Logger:     logger.DefaultLogger(),
-	}
+	router := documents.NewRouter(
+		db,
+		&staticIndexRepo{},
+		server.Client(),
+		logger.DefaultLogger(),
+	)
 
-	req := cluster.Request{
+	req := documents.Request{
 		IndexID:    "idx-test",
 		DocumentID: "doc-1",
 		Payload:    json.RawMessage(`{"title":"hello","attempts":"5","created_at":"2006-01-02T15:04:05Z"}`),
 	}
 
-	if err := handler.Handle(context.Background(), req); err != nil {
+	if err := router.Handle(context.Background(), req); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if len(capturedBody) == 0 {
@@ -88,26 +90,26 @@ func TestHandlerForwardsDocument(t *testing.T) {
 	}
 }
 
-func TestHandlerValidatesRequiredFields(t *testing.T) {
+func TestRouterValidatesRequiredFields(t *testing.T) {
 	db := openTestDB(t)
 	seedIndexRow(t, db, "idx-test")
 	seedNode(t, db, "node-1", "http://example.com")
 	seedShard(t, db, "idx-test", "idx-test-default", "node-1")
 
-	handler := cluster.Handler{
-		IndexRepo:  &staticIndexRepo{},
-		DB:         db,
-		HTTPClient: http.DefaultClient,
-		Logger:     logger.DefaultLogger(),
-	}
+	router := documents.NewRouter(
+		db,
+		&staticIndexRepo{},
+		http.DefaultClient,
+		logger.DefaultLogger(),
+	)
 
-	req := cluster.Request{
+	req := documents.Request{
 		IndexID:    "idx-test",
 		DocumentID: "doc-1",
 		Payload:    json.RawMessage(`{"title": ""}`),
 	}
 
-	err := handler.Handle(context.Background(), req)
+	err := router.Handle(context.Background(), req)
 	var validationErr *indexes.ValidationError
 	if err == nil || !errors.As(err, &validationErr) {
 		t.Fatalf("expected validation error, got %v", err)

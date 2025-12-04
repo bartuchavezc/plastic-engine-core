@@ -17,7 +17,7 @@ import (
 )
 
 // NewRouter exposes coordinator cluster operations via HTTP.
-func NewRouter(coord *cluster.Coordinator, joinService *cluster.JoinService) http.Handler {
+func NewRouter(coord *cluster.Coordinator, joinService *nodes.JoinService) http.Handler {
 	r := chi.NewRouter()
 
 	clusterindex.Mount(r, coord)
@@ -36,11 +36,11 @@ func NewRouter(coord *cluster.Coordinator, joinService *cluster.JoinService) htt
 
 var membershipTracer = otel.Tracer("cluster/http/membership")
 
-func handleJoin(w http.ResponseWriter, r *http.Request, joinService *cluster.JoinService) {
+func handleJoin(w http.ResponseWriter, r *http.Request, joinService *nodes.JoinService) {
 	ctx, span := membershipTracer.Start(r.Context(), "cluster.membership.join")
 	defer span.End()
 
-	var req cluster.JoinRequest
+	var req nodes.JoinRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid join payload", http.StatusBadRequest)
 		return
@@ -63,11 +63,11 @@ func handleJoin(w http.ResponseWriter, r *http.Request, joinService *cluster.Joi
 	}
 }
 
-func handleHeartbeat(w http.ResponseWriter, r *http.Request, joinService *cluster.JoinService) {
+func handleHeartbeat(w http.ResponseWriter, r *http.Request, joinService *nodes.JoinService) {
 	ctx, span := membershipTracer.Start(r.Context(), "cluster.membership.heartbeat")
 	defer span.End()
 
-	var req cluster.HeartbeatRequest
+	var req nodes.HeartbeatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid heartbeat payload", http.StatusBadRequest)
 		return

@@ -1,31 +1,27 @@
-package cluster
+package nodes
 
 import (
 	"context"
 )
 
-import (
-	"plastic-engine-core/internal/core/cluster"
-)
-
-// JoinService wraps coordinator logic to expose search-specific join operations.
+// JoinService wraps the nodes service for HTTP adapter compatibility.
 type JoinService struct {
-	coordinator *cluster.Coordinator
+	service *Service
 }
 
-// NewJoinService builds a service using the provided cluster.
-func NewJoinService(coord *cluster.Coordinator) *JoinService {
+// NewJoinService builds a JoinService using the provided node service.
+func NewJoinService(svc *Service) *JoinService {
 	return &JoinService{
-		coordinator: coord,
+		service: svc,
 	}
 }
 
-// Join delegates the join request to the cluster.
-func (s *JoinService) Join(ctx context.Context, req cluster.JoinRequest) (cluster.JoinResponse, error) {
-	return s.cluster.Join(ctx, req)
+// Join delegates the join request to the node service.
+func (s *JoinService) Join(ctx context.Context, req JoinRequest) (JoinResponse, error) {
+	return s.service.Join(ctx, req)
 }
 
-// Heartbeat proxies the heartbeat request to the cluster.
-func (s *JoinService) Heartbeat(ctx context.Context, req cluster.HeartbeatRequest) error {
-	return s.cluster.Heartbeat(ctx, req)
+// Heartbeat proxies the heartbeat request to the node service.
+func (s *JoinService) Heartbeat(ctx context.Context, req HeartbeatRequest) error {
+	return s.service.Heartbeat(ctx, req)
 }

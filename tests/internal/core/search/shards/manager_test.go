@@ -11,12 +11,12 @@ func TestManagerSyncOpensNewShard(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	manager := shard.NewManager(root)
+	manager := shards.NewManager(root)
 	t.Cleanup(func() {
 		_ = manager.Close()
 	})
 
-	assignments := []shard.Assignment{
+	assignments := []shards.Assignment{
 		{
 			ID:             "idx-1-2025-10",
 			IndexID:        "idx-1",
@@ -45,12 +45,12 @@ func TestManagerSyncSkipsExistingShard(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	manager := shard.NewManager(root)
+	manager := shards.NewManager(root)
 	t.Cleanup(func() {
 		_ = manager.Close()
 	})
 
-	assignments := []shard.Assignment{{
+	assignments := []shards.Assignment{{
 		ID:             "idx-1-2025-10",
 		IndexID:        "idx-1",
 		ShardKey:       "2025-10",
@@ -78,11 +78,11 @@ func TestManagerSyncSkipsExistingShard(t *testing.T) {
 func TestManagerSyncReturnsErrorOnOpenFailure(t *testing.T) {
 	t.Parallel()
 
-	manager := shard.NewManager("/invalid/path/that/should/fail")
+	manager := shards.NewManager("/invalid/path/that/should/fail")
 	t.Cleanup(func() {
 		_ = manager.Close()
 	})
-	if err := manager.Sync([]shard.Assignment{{
+	if err := manager.Sync([]shards.Assignment{{
 		ID:             "shard-fail",
 		IndexID:        "idx",
 		ShardKey:       "default",
@@ -103,8 +103,8 @@ func TestManagerLoadsExistingShardsFromDisk(t *testing.T) {
 
 	root := t.TempDir()
 
-	initial := shard.NewManager(root)
-	assignments := []shard.Assignment{{
+	initial := shards.NewManager(root)
+	assignments := []shards.Assignment{{
 		ID:             "idx-1-2025-10",
 		IndexID:        "idx-1",
 		ShardKey:       "2025-10",
@@ -123,7 +123,7 @@ func TestManagerLoadsExistingShardsFromDisk(t *testing.T) {
 		t.Fatalf("Close initial manager: %v", err)
 	}
 
-	reloaded := shard.NewManager(root)
+	reloaded := shards.NewManager(root)
 	t.Cleanup(func() {
 		_ = reloaded.Close()
 	})

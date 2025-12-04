@@ -8,6 +8,7 @@ import (
 
 	"plastic-engine-core/internal/core/cluster"
 	indexes "plastic-engine-core/internal/core/cluster/indexes"
+	"plastic-engine-core/internal/core/cluster/nodes"
 )
 
 func TestStartHealthMonitorMarksStaleNodes(t *testing.T) {
@@ -17,7 +18,7 @@ func TestStartHealthMonitorMarksStaleNodes(t *testing.T) {
 
 	ctx := context.Background()
 
-	_, err := coord.Join(ctx, cluster.JoinRequest{
+	_, err := coord.NodesService().Join(ctx, nodes.JoinRequest{
 		NodeID:        "node-1",
 		Role:          "search",
 		AdvertiseAddr: "localhost:0",
@@ -27,7 +28,7 @@ func TestStartHealthMonitorMarksStaleNodes(t *testing.T) {
 		t.Fatalf("Join: %v", err)
 	}
 
-	if err := coord.Heartbeat(ctx, cluster.HeartbeatRequest{
+	if err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{
 		NodeID: "node-1",
 		Shards: nil,
 	}); err != nil {
@@ -57,7 +58,7 @@ func TestCreateIndexAssignsShardsToReadyNodes(t *testing.T) {
 
 	ctx := context.Background()
 
-	joinResp, err := coord.Join(ctx, cluster.JoinRequest{
+	joinResp, err := coord.NodesService().Join(ctx, nodes.JoinRequest{
 		NodeID:        "node-ready",
 		Role:          "search",
 		AdvertiseAddr: "localhost:0",
@@ -70,7 +71,7 @@ func TestCreateIndexAssignsShardsToReadyNodes(t *testing.T) {
 		t.Fatalf("expected no shards before index creation")
 	}
 
-	if err := coord.Heartbeat(ctx, cluster.HeartbeatRequest{
+	if err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{
 		NodeID: "node-ready",
 	}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
@@ -147,7 +148,7 @@ func TestJoinAssignsPendingShards(t *testing.T) {
 		t.Fatalf("CreateIndex: %v", err)
 	}
 
-	resp, err := coord.Join(ctx, cluster.JoinRequest{
+	resp, err := coord.NodesService().Join(ctx, nodes.JoinRequest{
 		NodeID:        "node-assign",
 		Role:          "search",
 		AdvertiseAddr: "localhost:0",
@@ -168,7 +169,7 @@ func TestJoinReturnsExistingAssignments(t *testing.T) {
 	coord := newTestCoordinator(t)
 	ctx := context.Background()
 
-	initialResp, err := coord.Join(ctx, cluster.JoinRequest{
+	initialResp, err := coord.NodesService().Join(ctx, nodes.JoinRequest{
 		NodeID:        "node-rejoin",
 		Role:          "search",
 		AdvertiseAddr: "localhost:0",
@@ -181,7 +182,7 @@ func TestJoinReturnsExistingAssignments(t *testing.T) {
 		t.Fatalf("expected no shards on first join, got %d", len(initialResp.Shards))
 	}
 
-	if err := coord.Heartbeat(ctx, cluster.HeartbeatRequest{
+	if err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{
 		NodeID: "node-rejoin",
 	}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
@@ -210,7 +211,7 @@ func TestJoinReturnsExistingAssignments(t *testing.T) {
 		t.Fatalf("CreateIndex: %v", err)
 	}
 
-	rejoinResp, err := coord.Join(ctx, cluster.JoinRequest{
+	rejoinResp, err := coord.NodesService().Join(ctx, nodes.JoinRequest{
 		NodeID:        "node-rejoin",
 		Role:          "search",
 		AdvertiseAddr: "localhost:0",
@@ -242,7 +243,7 @@ func TestJoinRequiresRole(t *testing.T) {
 	coord := newTestCoordinator(t)
 	ctx := context.Background()
 
-	if _, err := coord.Join(ctx, cluster.JoinRequest{}); err == nil {
+	if _, err := coord.NodesService().Join(ctx, nodes.JoinRequest{}); err == nil {
 		t.Fatalf("expected error for missing role")
 	}
 }
@@ -253,7 +254,7 @@ func TestHeartbeatUpdatesStatus(t *testing.T) {
 	coord := newTestCoordinator(t)
 	ctx := context.Background()
 
-	_, err := coord.Join(ctx, cluster.JoinRequest{
+	_, err := coord.NodesService().Join(ctx, nodes.JoinRequest{
 		NodeID:        "node-heartbeat",
 		Role:          "search",
 		AdvertiseAddr: "http://127.0.0.1:0",
@@ -262,7 +263,7 @@ func TestHeartbeatUpdatesStatus(t *testing.T) {
 		t.Fatalf("Join: %v", err)
 	}
 
-	if err := coord.Heartbeat(ctx, cluster.HeartbeatRequest{NodeID: "node-heartbeat"}); err != nil {
+	if err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{NodeID: "node-heartbeat"}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
 

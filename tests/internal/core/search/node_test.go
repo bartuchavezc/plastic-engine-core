@@ -18,7 +18,7 @@ func TestNodeInitialisePersistsNodeID(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
-	manager := shard.NewManager(tempDir)
+	manager := shards.NewManager(tempDir)
 
 	fakeClient := &stubClusterClient{
 		joinResp: node.JoinResponse{
@@ -26,7 +26,7 @@ func TestNodeInitialisePersistsNodeID(t *testing.T) {
 		},
 	}
 
-	node := node.New(
+	n := node.New(
 		node.NodeInfo{Role: "search", DataDir: tempDir},
 		"http://localhost:8080",
 		fakeClient,
@@ -34,11 +34,11 @@ func TestNodeInitialisePersistsNodeID(t *testing.T) {
 		logger.DefaultLogger(),
 	)
 
-	if err := node.Initialize(); err != nil {
+	if err := n.Initialize(); err != nil {
 		t.Fatalf("Initialize: %v", err)
 	}
 
-	if got := node.Info.ID; got != "node-123" {
+	if got := n.Info.ID; got != "node-123" {
 		t.Fatalf("node.Info.ID = %q, want %q", got, "node-123")
 	}
 
@@ -55,13 +55,13 @@ func TestNodeStartHeartbeatStopsWithContext(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
-	manager := shard.NewManager(tempDir)
+	manager := shards.NewManager(tempDir)
 
 	fakeClient := &stubClusterClient{
 		joinResp: node.JoinResponse{NodeID: "node-abc"},
 	}
 
-	node := node.New(
+	n := node.New(
 		node.NodeInfo{Role: "search", DataDir: tempDir},
 		"http://localhost:8080",
 		fakeClient,
@@ -69,14 +69,14 @@ func TestNodeStartHeartbeatStopsWithContext(t *testing.T) {
 		logger.DefaultLogger(),
 	)
 
-	if err := node.Initialize(); err != nil {
+	if err := n.Initialize(); err != nil {
 		t.Fatalf("Initialize: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	node.StartHeartbeat(ctx, 10*time.Millisecond)
+	n.StartHeartbeat(ctx, 10*time.Millisecond)
 
 	if err := waitForCalls(fakeClient, 1, 200*time.Millisecond); err != nil {
 		t.Fatalf("waitForCalls: %v", err)

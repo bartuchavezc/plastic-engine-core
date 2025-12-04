@@ -1,4 +1,4 @@
-package cluster
+package documents
 
 import (
 	"bytes"
@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	indexes "plastic-engine-core/internal/core/cluster/indexes"
+	"plastic-engine-core/internal/core/cluster/indexes"
 )
 
-// normalizeDocumentPayload validates and coerces the incoming payload according to the index mapping.
-func normalizeDocumentPayload(def indexes.IndexDefinition, raw json.RawMessage) (json.RawMessage, error) {
+// NormalizePayload validates and coerces the incoming payload according to the index mapping.
+func NormalizePayload(def indexes.IndexDefinition, raw json.RawMessage) (json.RawMessage, error) {
 	trimmed := bytes.TrimSpace(raw)
 
 	var doc map[string]any
@@ -200,3 +200,4 @@ func parseDateFromString(value string) (time.Time, error) {
 
 	return time.Time{}, fmt.Errorf("unsupported date format")
 }
+

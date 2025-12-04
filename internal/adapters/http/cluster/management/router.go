@@ -11,6 +11,7 @@ import (
 
 	clusterhttputil "plastic-engine-core/internal/adapters/http/cluster/httputil"
 	"plastic-engine-core/internal/core/cluster"
+	"plastic-engine-core/internal/core/cluster/shards"
 )
 
 var tracer = otel.Tracer("cluster/http/management")
@@ -64,7 +65,7 @@ func (h *handler) handleListShards(w http.ResponseWriter, r *http.Request) {
 	ctx, span := tracer.Start(r.Context(), "cluster.management.listShards")
 	defer span.End()
 
-	filter := cluster.ShardFilter{
+	filter := shards.ShardFilter{
 		IndexID: strings.TrimSpace(r.URL.Query().Get("index_id")),
 		NodeID:  strings.TrimSpace(r.URL.Query().Get("node_id")),
 		State:   strings.TrimSpace(r.URL.Query().Get("state")),
@@ -83,7 +84,7 @@ func (h *handler) handleListShardsForIndex(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	filter := cluster.ShardFilter{
+	filter := shards.ShardFilter{
 		IndexID: indexID,
 		NodeID:  strings.TrimSpace(r.URL.Query().Get("node_id")),
 		State:   strings.TrimSpace(r.URL.Query().Get("state")),
@@ -92,15 +93,15 @@ func (h *handler) handleListShardsForIndex(w http.ResponseWriter, r *http.Reques
 	h.respondWithShards(ctx, w, filter)
 }
 
-func (h *handler) respondWithShards(ctx context.Context, w http.ResponseWriter, filter cluster.ShardFilter) {
-	shards, err := h.coord.ListShards(ctx, filter)
+func (h *handler) respondWithShards(ctx context.Context, w http.ResponseWriter, filter shards.ShardFilter) {
+	shardRecords, err := h.coord.ListShards(ctx, filter)
 	if err != nil {
 		http.Error(w, "failed to list shards", http.StatusInternalServerError)
 		return
 	}
 
-	response := make([]shardResponse, 0, len(shards))
-	for _, shard := range shards {
+	response := make([]shardResponse, 0, len(shardRecords))
+	for _, shard := range shardRecords {
 		response = append(response, shardResponse{
 			ID:          shard.ID,
 			IndexID:     shard.IndexID,

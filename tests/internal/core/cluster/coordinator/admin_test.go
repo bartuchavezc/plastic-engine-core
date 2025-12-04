@@ -4,8 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"plastic-engine-core/internal/core/cluster"
 	indexes "plastic-engine-core/internal/core/cluster/indexes"
+	"plastic-engine-core/internal/core/cluster/nodes"
+	"plastic-engine-core/internal/core/cluster/shards"
 )
 
 func TestListShardsFiltersByIndex(t *testing.T) {
@@ -33,15 +34,15 @@ func TestListShardsFiltersByIndex(t *testing.T) {
 		t.Fatalf("CreateIndex: %v", err)
 	}
 
-	shards, err := coord.ListShards(ctx, cluster.ShardFilter{IndexID: "idx-admin-test"})
+	shardList, err := coord.ListShards(ctx, shards.ShardFilter{IndexID: "idx-admin-test"})
 	if err != nil {
 		t.Fatalf("ListShards: %v", err)
 	}
-	if len(shards) != 1 {
-		t.Fatalf("shards len = %d, want 1", len(shards))
+	if len(shardList) != 1 {
+		t.Fatalf("shards len = %d, want 1", len(shardList))
 	}
-	if shards[0].IndexID != "idx-admin-test" {
-		t.Fatalf("shard IndexID = %q, want %q", shards[0].IndexID, "idx-admin-test")
+	if shardList[0].IndexID != "idx-admin-test" {
+		t.Fatalf("shard IndexID = %q, want %q", shardList[0].IndexID, "idx-admin-test")
 	}
 }
 
@@ -51,7 +52,7 @@ func TestListNodesReturnsHeartbeat(t *testing.T) {
 	coord := newTestCoordinator(t)
 	ctx := context.Background()
 
-	_, err := coord.Join(ctx, cluster.JoinRequest{
+	_, err := coord.NodesService().Join(ctx, nodes.JoinRequest{
 		NodeID:        "node-admin-test",
 		Role:          "search",
 		AdvertiseAddr: "http://127.0.0.1:0",
@@ -61,18 +62,18 @@ func TestListNodesReturnsHeartbeat(t *testing.T) {
 		t.Fatalf("Join: %v", err)
 	}
 
-	if err := coord.Heartbeat(ctx, cluster.HeartbeatRequest{NodeID: "node-admin-test"}); err != nil {
+	if err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{NodeID: "node-admin-test"}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
 
-	nodes, err := coord.ListNodes(ctx)
+	nodeList, err := coord.ListNodes(ctx)
 	if err != nil {
 		t.Fatalf("ListNodes: %v", err)
 	}
-	if len(nodes) != 1 {
-		t.Fatalf("nodes len = %d, want 1", len(nodes))
+	if len(nodeList) != 1 {
+		t.Fatalf("nodes len = %d, want 1", len(nodeList))
 	}
-	if nodes[0].LastHeartbeat.IsZero() {
+	if nodeList[0].LastHeartbeat.IsZero() {
 		t.Fatalf("expected last heartbeat to be set")
 	}
 }

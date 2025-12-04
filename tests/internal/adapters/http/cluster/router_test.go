@@ -13,15 +13,15 @@ import (
 
 	clusterhttp "plastic-engine-core/internal/adapters/http/cluster"
 	"plastic-engine-core/internal/core/cluster"
-	"plastic-engine-core/internal/core/cluster/nodes"
 	indexes "plastic-engine-core/internal/core/cluster/indexes"
+	"plastic-engine-core/internal/core/cluster/nodes"
 )
 
 func TestCreateIndexEndpoint(t *testing.T) {
 	t.Parallel()
 
 	coord := newTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, nodes.NewJoinService(coord.NodesService()))
 
 	payload := map[string]any{
 		"id":   "idx-blog",
@@ -81,7 +81,7 @@ func TestCreateIndexEndpointValidationError(t *testing.T) {
 	t.Parallel()
 
 	coord := newTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, nodes.NewJoinService(coord.NodesService()))
 
 	payload := map[string]any{
 		"name": "missing-id",
@@ -128,11 +128,11 @@ func TestIngestDocumentRoutesToPrimaryShard(t *testing.T) {
 	defer server.Close()
 
 	coord := newTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, nodes.NewJoinService(coord.NodesService()))
 
 	ctx := context.Background()
 
-	_, err := coord.Join(ctx, cluster.JoinRequest{
+	_, err := coord.NodesService().Join(ctx, nodes.JoinRequest{
 		NodeID:        "node-1",
 		Role:          "search",
 		AdvertiseAddr: server.URL,
@@ -142,7 +142,7 @@ func TestIngestDocumentRoutesToPrimaryShard(t *testing.T) {
 		t.Fatalf("Join: %v", err)
 	}
 
-	if err := coord.Heartbeat(ctx, cluster.HeartbeatRequest{
+	if err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{
 		NodeID: "node-1",
 	}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
@@ -230,7 +230,7 @@ func TestIngestDocumentRequiresFields(t *testing.T) {
 	t.Parallel()
 
 	coord := newTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, nodes.NewJoinService(coord.NodesService()))
 
 	ctx := context.Background()
 	_, err := coord.CreateIndex(ctx, indexes.CreateIndexRequest{
@@ -279,7 +279,7 @@ func TestIngestDocumentValidatesFieldTypes(t *testing.T) {
 	t.Parallel()
 
 	coord := newTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, nodes.NewJoinService(coord.NodesService()))
 
 	ctx := context.Background()
 	_, err := coord.CreateIndex(ctx, indexes.CreateIndexRequest{
@@ -330,10 +330,10 @@ func TestListNodesEndpoint(t *testing.T) {
 	t.Parallel()
 
 	coord := newTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, nodes.NewJoinService(coord.NodesService()))
 	ctx := context.Background()
 
-	_, err := coord.Join(ctx, cluster.JoinRequest{
+	_, err := coord.NodesService().Join(ctx, nodes.JoinRequest{
 		NodeID:        "node-admin",
 		Role:          "search",
 		AdvertiseAddr: "http://127.0.0.1:9000",
@@ -343,7 +343,7 @@ func TestListNodesEndpoint(t *testing.T) {
 		t.Fatalf("Join: %v", err)
 	}
 
-	if err := coord.Heartbeat(ctx, cluster.HeartbeatRequest{
+	if err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{
 		NodeID: "node-admin",
 	}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
@@ -358,29 +358,29 @@ func TestListNodesEndpoint(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
-	var nodes []struct {
+	var nodeList []struct {
 		ID            string     `json:"id"`
 		Role          string     `json:"role"`
 		Status        string     `json:"status"`
 		LastHeartbeat *time.Time `json:"last_heartbeat"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &nodes); err != nil {
+	if err := json.Unmarshal(rec.Body.Bytes(), &nodeList); err != nil {
 		t.Fatalf("Unmarshal nodes: %v", err)
 	}
 
-	if len(nodes) != 1 {
-		t.Fatalf("nodes length = %d, want 1", len(nodes))
+	if len(nodeList) != 1 {
+		t.Fatalf("nodes length = %d, want 1", len(nodeList))
 	}
-	if nodes[0].ID != "node-admin" {
-		t.Fatalf("node id = %q, want %q", nodes[0].ID, "node-admin")
+	if nodeList[0].ID != "node-admin" {
+		t.Fatalf("node id = %q, want %q", nodeList[0].ID, "node-admin")
 	}
-	if nodes[0].Role != "search" {
-		t.Fatalf("node role = %q, want %q", nodes[0].Role, "search")
+	if nodeList[0].Role != "search" {
+		t.Fatalf("node role = %q, want %q", nodeList[0].Role, "search")
 	}
-	if nodes[0].Status != "ready" {
-		t.Fatalf("node status = %q, want %q", nodes[0].Status, "ready")
+	if nodeList[0].Status != "ready" {
+		t.Fatalf("node status = %q, want %q", nodeList[0].Status, "ready")
 	}
-	if nodes[0].LastHeartbeat == nil {
+	if nodeList[0].LastHeartbeat == nil {
 		t.Fatalf("expected last heartbeat to be present")
 	}
 }
@@ -389,7 +389,7 @@ func TestListIndexesEndpoint(t *testing.T) {
 	t.Parallel()
 
 	coord := newTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, nodes.NewJoinService(coord.NodesService()))
 
 	ctx := context.Background()
 	_, err := coord.CreateIndex(ctx, indexes.CreateIndexRequest{
@@ -428,7 +428,7 @@ func TestListIndexesEndpoint(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
-	var indexes []struct {
+	var indexList []struct {
 		ID            string `json:"id"`
 		Name          string `json:"name"`
 		ShardStrategy string `json:"shard_strategy"`
@@ -439,26 +439,26 @@ func TestListIndexesEndpoint(t *testing.T) {
 			Index    bool   `json:"index"`
 		} `json:"field_mappings"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &indexes); err != nil {
+	if err := json.Unmarshal(rec.Body.Bytes(), &indexList); err != nil {
 		t.Fatalf("Unmarshal indexes: %v", err)
 	}
 
-	if len(indexes) != 1 {
-		t.Fatalf("indexes length = %d, want 1", len(indexes))
+	if len(indexList) != 1 {
+		t.Fatalf("indexes length = %d, want 1", len(indexList))
 	}
-	if indexes[0].ID != "idx-admin" {
-		t.Fatalf("index id = %q, want %q", indexes[0].ID, "idx-admin")
+	if indexList[0].ID != "idx-admin" {
+		t.Fatalf("index id = %q, want %q", indexList[0].ID, "idx-admin")
 	}
-	if indexes[0].ShardStrategy != "automatic" {
-		t.Fatalf("shard strategy = %q, want %q", indexes[0].ShardStrategy, "automatic")
+	if indexList[0].ShardStrategy != "automatic" {
+		t.Fatalf("shard strategy = %q, want %q", indexList[0].ShardStrategy, "automatic")
 	}
-	if got := len(indexes[0].FieldMappings); got != 1 {
+	if got := len(indexList[0].FieldMappings); got != 1 {
 		t.Fatalf("field mappings length = %d, want 1", got)
 	}
-	if !indexes[0].FieldMappings[0].Required {
+	if !indexList[0].FieldMappings[0].Required {
 		t.Fatalf("expected field mapping required")
 	}
-	if !indexes[0].FieldMappings[0].Index {
+	if !indexList[0].FieldMappings[0].Index {
 		t.Fatalf("expected field mapping indexed")
 	}
 }
@@ -467,7 +467,7 @@ func TestGetIndexEndpoint(t *testing.T) {
 	t.Parallel()
 
 	coord := newTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, nodes.NewJoinService(coord.NodesService()))
 
 	ctx := context.Background()
 	_, err := coord.CreateIndex(ctx, indexes.CreateIndexRequest{
@@ -517,8 +517,8 @@ func TestGetIndexEndpoint(t *testing.T) {
 	if index.Name != "detail" {
 		t.Fatalf("index name = %q, want %q", index.Name, "detail")
 	}
-	if indexes.ShardStrategy != "automatic" {
-		t.Fatalf("shard strategy = %q, want %q", indexes.ShardStrategy, "automatic")
+	if index.ShardStrategy != "automatic" {
+		t.Fatalf("shard strategy = %q, want %q", index.ShardStrategy, "automatic")
 	}
 }
 
@@ -526,7 +526,7 @@ func TestListShardsForIndexEndpoint(t *testing.T) {
 	t.Parallel()
 
 	coord := newTestCoordinator(t)
-	router := clusterhttp.NewRouter(coord, cluster.NewJoinService(coord))
+	router := clusterhttp.NewRouter(coord, nodes.NewJoinService(coord.NodesService()))
 
 	ctx := context.Background()
 	_, err := coord.CreateIndex(ctx, indexes.CreateIndexRequest{
@@ -561,19 +561,19 @@ func TestListShardsForIndexEndpoint(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
-	var shards []struct {
+	var shardList []struct {
 		IndexID string `json:"index_id"`
 		State   string `json:"state"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &shards); err != nil {
+	if err := json.Unmarshal(rec.Body.Bytes(), &shardList); err != nil {
 		t.Fatalf("Unmarshal shards: %v", err)
 	}
 
-	if len(shards) == 0 {
+	if len(shardList) == 0 {
 		t.Fatalf("expected shards, got none")
 	}
 
-	for _, shard := range shards {
+	for _, shard := range shardList {
 		if shard.IndexID != "idx-shard" {
 			t.Fatalf("shard index_id = %q, want %q", shard.IndexID, "idx-shard")
 		}

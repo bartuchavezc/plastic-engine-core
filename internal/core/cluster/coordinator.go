@@ -7,11 +7,13 @@ import (
 	"net/http"
 	"time"
 
-	indexes "plastic-engine-core/internal/core/cluster/indexes"
-	"plastic-engine-core/internal/core/cluster/indexes/sharding"
-	"plastic-engine-core/internal/pkg/logger"
-
 	"go.opentelemetry.io/otel"
+
+	"plastic-engine-core/internal/core/cluster/documents"
+	"plastic-engine-core/internal/core/cluster/indexes"
+	"plastic-engine-core/internal/core/cluster/nodes"
+	"plastic-engine-core/internal/core/cluster/shards"
+	"plastic-engine-core/internal/pkg/logger"
 )
 
 // Coordinator orchestrates cluster metadata and shard assignments.
@@ -21,9 +23,10 @@ type Coordinator struct {
 	db   *sql.DB
 	log  logger.Logger
 
-	indexRepo           *indexes.Repository
-	shardPlannerFactory *sharding.PlannerFactory
-	ingestHandler       Handler
+	indexRepo   *indexes.Repository
+	nodesSvc    *nodes.Service
+	shardsSvc   *shards.Service
+	documentsRouter *documents.Router
 }
 
 // NewCoordinator creates a coordinator bound to a SQLite metadata store.
@@ -37,22 +40,21 @@ func NewCoordinator(role string, port string, dbPath string) (*Coordinator, erro
 		Timeout: 5 * time.Second,
 	}
 
-	repo := indexes.NewRepository(db)
-	logger := logger.DefaultLogger()
-	return &Coordinator{
-		Role: role,
-		Port: port,
-		db:   db,
-		log:  logger,
+	log := logger.DefaultLogger()
+	indexRepo := indexes.NewRepository(db)
+	shardsSvc := shards.NewService(db, log)
+	nodesSvc := nodes.NewService(db, shardsSvc, indexRepo, log)
+	docRouter := documents.NewRouter(db, indexRepo, httpClient, log)
 
-		indexRepo:           repo,
-		shardPlannerFactory: sharding.NewFactory(),
-		ingestHandler: Handler{
-			IndexRepo:  repo,
-			DB:         db,
-			HTTPClient: httpClient,
-			Logger:     logger,
-		},
+	return &Coordinator{
+		Role:           role,
+		Port:           port,
+		db:             db,
+		log:            log,
+		indexRepo:      indexRepo,
+		nodesSvc:       nodesSvc,
+		shardsSvc:      shardsSvc,
+		documentsRouter: docRouter,
 	}, nil
 }
 
@@ -74,6 +76,16 @@ func (c *Coordinator) DB() *sql.DB {
 	return c.db
 }
 
+// NodesService returns the nodes service for external use.
+func (c *Coordinator) NodesService() *nodes.Service {
+	return c.nodesSvc
+}
+
+// ShardsService returns the shards service for external use.
+func (c *Coordinator) ShardsService() *shards.Service {
+	return c.shardsSvc
+}
+
 // CreateIndex registers a new index definition in the metadata store.
 func (c *Coordinator) CreateIndex(ctx context.Context, req indexes.CreateIndexRequest) (indexes.CreateIndexResponse, error) {
 	ctx, span := otel.Tracer("cluster.index").Start(ctx, "Coordinator.CreateIndex")
@@ -91,7 +103,7 @@ func (c *Coordinator) CreateIndex(ctx context.Context, req indexes.CreateIndexRe
 
 	c.log.Info("index created", logger.Field{Key: "index_id", Value: resp.Definition.ID})
 
-	if err := c.planInitialShards(ctx, resp.Definition); err != nil {
+	if err := c.shardsSvc.PlanInitial(ctx, resp.Definition); err != nil {
 		c.log.Error("planning initial shards failed", logger.Field{Key: "error", Value: err}, logger.Field{Key: "index_id", Value: resp.Definition.ID})
 		return indexes.CreateIndexResponse{}, err
 	}
@@ -126,64 +138,77 @@ func (c *Coordinator) GetIndex(ctx context.Context, id string) (indexes.IndexDef
 	return def, nil
 }
 
-// StartHealthMonitor periodically marks nodes without fresh heartbeats as unreachable.
+// StartHealthMonitor delegates to the nodes service health monitor.
 func (c *Coordinator) StartHealthMonitor(ctx context.Context, interval time.Duration, timeout time.Duration) {
-	if c == nil || c.db == nil {
+	if c == nil || c.nodesSvc == nil {
 		return
 	}
-
-	if interval <= 0 {
-		interval = 10 * time.Second
-	}
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-
-	ticker := time.NewTicker(interval)
-
-	go func() {
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				c.Logger().Info("health monitor stopped")
-				return
-			case <-ticker.C:
-				if err := c.markStaleNodes(timeout); err != nil {
-					c.Logger().Error("health monitor error", logger.Field{Key: "error", Value: err})
-				}
-			}
-		}
-	}()
+	c.nodesSvc.StartHealthMonitor(ctx, interval, timeout)
 }
 
-func (c *Coordinator) markStaleNodes(timeout time.Duration) error {
-	threshold := time.Now().UTC().Add(-timeout).Format("2006-01-02 15:04:05")
+// IngestDocument routes a document to the appropriate search node.
+func (c *Coordinator) IngestDocument(ctx context.Context, req documents.Request) error {
+	if c == nil || c.documentsRouter == nil {
+		return errors.New("coordinator not initialised")
+	}
+	return c.documentsRouter.Handle(ctx, req)
+}
 
-	res, err := c.db.Exec(
-		`UPDATE nodes
-		 SET status = 'unreachable'
-		 WHERE status <> 'unreachable'
-		   AND (last_heartbeat IS NULL OR last_heartbeat <= ?)`,
-		threshold,
-	)
+// ListNodes returns all nodes registered in the cluster.
+func (c *Coordinator) ListNodes(ctx context.Context) ([]nodes.NodeRecord, error) {
+	if c == nil || c.nodesSvc == nil {
+		return nil, errors.New("coordinator not initialised")
+	}
+	return c.nodesSvc.List(ctx)
+}
+
+// ListShards returns shard metadata filtered by the provided filter.
+func (c *Coordinator) ListShards(ctx context.Context, filter shards.ShardFilter) ([]shards.ShardRecord, error) {
+	if c == nil || c.shardsSvc == nil {
+		return nil, errors.New("coordinator not initialised")
+	}
+	return c.shardsSvc.List(ctx, filter)
+}
+
+// ListIndexes returns all index definitions registered in the cluster.
+func (c *Coordinator) ListIndexes(ctx context.Context) ([]indexes.IndexDefinition, error) {
+	if c == nil || c.indexRepo == nil {
+		return nil, errors.New("coordinator not initialised")
+	}
+
+	defs, err := c.indexRepo.ListIndexes(ctx)
+	if err != nil {
+		c.log.Error("list indexes failed", logger.Field{Key: "error", Value: err})
+		return nil, err
+	}
+	return defs, nil
+}
+
+const defaultShardAssignmentBatch = 32
+
+func (c *Coordinator) assignPendingShardsToReadyNodes(ctx context.Context) error {
+	eligibleNodes, err := c.nodesSvc.ListEligible(ctx)
 	if err != nil {
 		return err
 	}
 
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return err
+	if len(eligibleNodes) == 0 {
+		return nil
 	}
 
-	if affected > 0 {
-		c.Logger().Info("marked nodes unreachable", logger.Field{Key: "count", Value: affected})
+	for _, node := range eligibleNodes {
+		assignments, err := c.shardsSvc.AssignToNode(ctx, node.ID, defaultShardAssignmentBatch)
+		if err != nil {
+			return err
+		}
+
+		if len(assignments) > 0 {
+			c.log.Info("assigned shards to node",
+				logger.Field{Key: "node_id", Value: node.ID},
+				logger.Field{Key: "count", Value: len(assignments)},
+			)
+		}
 	}
 
 	return nil
-}
-
-func (c *Coordinator) IngestDocument(ctx context.Context, req Request) error {
-	return c.ingestHandler.Handle(ctx, req)
 }

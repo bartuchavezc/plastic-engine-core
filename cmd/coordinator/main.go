@@ -10,14 +10,14 @@ import (
 	"time"
 
 	clusterhttp "plastic-engine-core/internal/adapters/http/cluster"
+	"plastic-engine-core/internal/adapters/telemetry/tracing"
 	"plastic-engine-core/internal/core/cluster"
 	"plastic-engine-core/internal/core/cluster/nodes"
 	"plastic-engine-core/internal/pkg/logger"
-	"plastic-engine-core/internal/adapters/telemetry/tracing"
 )
 
 func main() {
-	logger := logger.DefaultLogger()
+	log := logger.DefaultLogger()
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -34,29 +34,29 @@ func main() {
 		Endpoint:    os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 	})
 	if err != nil {
-		logger.Error("failed to initialise tracing", logger.Field{Key: "error", Value: err})
+		log.Error("failed to initialise tracing", logger.Field{Key: "error", Value: err})
 		os.Exit(1)
 	}
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := tracerShutdown(shutdownCtx); err != nil {
-			logger.Error("error shutting down tracer", logger.Field{Key: "error", Value: err})
+			log.Error("error shutting down tracer", logger.Field{Key: "error", Value: err})
 		}
 	}()
 
 	coord, err := cluster.NewCoordinator("coordinator", port, dbPath)
 	if err != nil {
-		logger.Error("failed to initialise coordinator", logger.Field{Key: "error", Value: err})
+		log.Error("failed to initialise coordinator", logger.Field{Key: "error", Value: err})
 		os.Exit(1)
 	}
 	defer func() {
 		if err := coord.Close(); err != nil {
-			logger.Error("error closing coordinator", logger.Field{Key: "error", Value: err})
+			log.Error("error closing coordinator", logger.Field{Key: "error", Value: err})
 		}
 	}()
 
-	joinService := cluster.NewJoinService(coord)
+	joinService := nodes.NewJoinService(coord.NodesService())
 	router := clusterhttp.NewRouter(coord, joinService)
 
 	server := &http.Server{
@@ -70,20 +70,20 @@ func main() {
 	coord.StartHealthMonitor(signalCtx, 5*time.Second, 15*time.Second)
 
 	go func() {
-		logger.Info("coordinator listening", logger.Field{Key: "addr", Value: server.Addr})
+		log.Info("coordinator listening", logger.Field{Key: "addr", Value: server.Addr})
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("coordinator server error", logger.Field{Key: "error", Value: err})
+			log.Error("coordinator server error", logger.Field{Key: "error", Value: err})
 			os.Exit(1)
 		}
 	}()
 
 	<-signalCtx.Done()
-	logger.Info("shutting down coordinator")
+	log.Info("shutting down coordinator")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Error("error shutting down server", logger.Field{Key: "error", Value: err})
+		log.Error("error shutting down server", logger.Field{Key: "error", Value: err})
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	clusterhttputil "plastic-engine-core/internal/adapters/http/cluster/httputil"
 	"plastic-engine-core/internal/core/cluster"
+	"plastic-engine-core/internal/core/cluster/documents"
 	indexes "plastic-engine-core/internal/core/cluster/indexes"
 )
 
@@ -252,7 +253,7 @@ func (h *handler) handleIngestDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ingestReq := cluster.Request{
+	ingestReq := documents.Request{
 		IndexID:    indexID,
 		DocumentID: req.DocumentID,
 		Routing:    req.Routing,
