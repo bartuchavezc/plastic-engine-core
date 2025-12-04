@@ -73,8 +73,8 @@ func (c *Client) Join(ctx context.Context, info node.NodeInfo) (node.JoinRespons
 	}, nil
 }
 
-// Heartbeat sends the current node status to the cluster.
-func (c *Client) Heartbeat(ctx context.Context, report node.HeartbeatReport) error {
+// Heartbeat sends the current node status to the cluster and returns mapping updates.
+func (c *Client) Heartbeat(ctx context.Context, report node.HeartbeatReport) (node.HeartbeatResponse, error) {
 	ctx, span := tracer.Start(ctx, "ClusterClient.Heartbeat")
 	defer span.End()
 
@@ -88,7 +88,15 @@ func (c *Client) Heartbeat(ctx context.Context, report node.HeartbeatReport) err
 		attribute.Int("shards.count", len(report.Shards)),
 	)
 
-	return c.postJSON(ctx, defaultHeartbeatPath, payload, nil)
+	var response nodes.HeartbeatResponse
+	if err := c.postJSON(ctx, defaultHeartbeatPath, payload, &response); err != nil {
+		return node.HeartbeatResponse{}, err
+	}
+
+	return node.HeartbeatResponse{
+		Status:         response.Status,
+		MappingUpdates: response.MappingUpdates,
+	}, nil
 }
 
 func (c *Client) postJSON(ctx context.Context, path string, payload any, out any) error {

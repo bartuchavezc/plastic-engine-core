@@ -119,18 +119,18 @@ func (s *Service) Join(ctx context.Context, req JoinRequest) (JoinResponse, erro
 	}, nil
 }
 
-// Heartbeat updates metadata for an existing node.
-func (s *Service) Heartbeat(ctx context.Context, req HeartbeatRequest) error {
+// Heartbeat updates metadata for an existing node and returns mapping version updates.
+func (s *Service) Heartbeat(ctx context.Context, req HeartbeatRequest) (HeartbeatResponse, error) {
 	ctx, span := otel.Tracer("nodes").Start(ctx, "nodes.Service.Heartbeat")
 	defer span.End()
 
 	if req.NodeID == "" {
-		return errors.New("heartbeat missing node id")
+		return HeartbeatResponse{}, errors.New("heartbeat missing node id")
 	}
 
 	tx, err := s.repo.DB().BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin heartbeat tx: %w", err)
+		return HeartbeatResponse{}, fmt.Errorf("begin heartbeat tx: %w", err)
 	}
 	defer func() {
 		_ = tx.Rollback()
@@ -139,7 +139,7 @@ func (s *Service) Heartbeat(ctx context.Context, req HeartbeatRequest) error {
 	timestamp := time.Now().UTC().Format("2006-01-02 15:04:05")
 
 	if err := s.repo.UpdateHeartbeat(ctx, tx, req.NodeID, timestamp); err != nil {
-		return err
+		return HeartbeatResponse{}, err
 	}
 
 	span.SetAttributes(
@@ -153,10 +153,50 @@ func (s *Service) Heartbeat(ctx context.Context, req HeartbeatRequest) error {
 	)
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit heartbeat tx: %w", err)
+		return HeartbeatResponse{}, fmt.Errorf("commit heartbeat tx: %w", err)
 	}
 
-	return nil
+	// Calculate mapping versions for indexes that the node has shards for
+	mappingUpdates, err := s.getMappingVersionsForShards(ctx, req.Shards)
+	if err != nil {
+		// Log but don't fail the heartbeat
+		s.log.Error("failed to get mapping versions", logger.Field{Key: "error", Value: err})
+		mappingUpdates = nil
+	}
+
+	return HeartbeatResponse{
+		Status:         "ok",
+		MappingUpdates: mappingUpdates,
+	}, nil
+}
+
+// getMappingVersionsForShards returns current mapping versions for indexes related to the given shards.
+func (s *Service) getMappingVersionsForShards(ctx context.Context, shardIDs []string) (map[string]int, error) {
+	if len(shardIDs) == 0 || s.indexRepo == nil {
+		return nil, nil
+	}
+
+	// Get unique index IDs from shard IDs
+	indexIDs, err := s.repo.GetIndexIDsForShards(ctx, shardIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(indexIDs) == 0 {
+		return nil, nil
+	}
+
+	// Get current mapping versions for each index
+	versions := make(map[string]int, len(indexIDs))
+	for _, indexID := range indexIDs {
+		def, err := s.indexRepo.GetIndex(ctx, indexID)
+		if err != nil {
+			continue // Skip indexes that can't be fetched
+		}
+		versions[indexID] = def.MappingVersion
+	}
+
+	return versions, nil
 }
 
 // List returns all nodes registered in the cluster.

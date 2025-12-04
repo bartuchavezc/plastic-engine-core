@@ -142,7 +142,7 @@ func TestIngestDocumentRoutesToPrimaryShard(t *testing.T) {
 		t.Fatalf("Join: %v", err)
 	}
 
-	if err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{
+	if _, err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{
 		NodeID: "node-1",
 	}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
@@ -343,7 +343,7 @@ func TestListNodesEndpoint(t *testing.T) {
 		t.Fatalf("Join: %v", err)
 	}
 
-	if err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{
+	if _, err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{
 		NodeID: "node-admin",
 	}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)

@@ -22,6 +22,6 @@ func (s *JoinService) Join(ctx context.Context, req JoinRequest) (JoinResponse, 
 }
 
 // Heartbeat proxies the heartbeat request to the node service.
-func (s *JoinService) Heartbeat(ctx context.Context, req HeartbeatRequest) error {
+func (s *JoinService) Heartbeat(ctx context.Context, req HeartbeatRequest) (HeartbeatResponse, error) {
 	return s.service.Heartbeat(ctx, req)
 }

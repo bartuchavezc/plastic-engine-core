@@ -28,7 +28,7 @@ func TestStartHealthMonitorMarksStaleNodes(t *testing.T) {
 		t.Fatalf("Join: %v", err)
 	}
 
-	if err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{
+	if _, err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{
 		NodeID: "node-1",
 		Shards: nil,
 	}); err != nil {
@@ -71,7 +71,7 @@ func TestCreateIndexAssignsShardsToReadyNodes(t *testing.T) {
 		t.Fatalf("expected no shards before index creation")
 	}
 
-	if err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{
+	if _, err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{
 		NodeID: "node-ready",
 	}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
@@ -182,7 +182,7 @@ func TestJoinReturnsExistingAssignments(t *testing.T) {
 		t.Fatalf("expected no shards on first join, got %d", len(initialResp.Shards))
 	}
 
-	if err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{
+	if _, err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{
 		NodeID: "node-rejoin",
 	}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
@@ -263,7 +263,7 @@ func TestHeartbeatUpdatesStatus(t *testing.T) {
 		t.Fatalf("Join: %v", err)
 	}
 
-	if err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{NodeID: "node-heartbeat"}); err != nil {
+	if _, err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{NodeID: "node-heartbeat"}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
 

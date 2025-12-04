@@ -15,6 +15,7 @@ import (
 	"plastic-engine-core/internal/core/cluster"
 	"plastic-engine-core/internal/core/cluster/documents"
 	indexes "plastic-engine-core/internal/core/cluster/indexes"
+	"plastic-engine-core/internal/core/cluster/mappings"
 )
 
 var tracer = otel.Tracer("cluster/http/index")
@@ -29,6 +30,10 @@ func Mount(r chi.Router, coord *cluster.Coordinator) {
 	r.Get("/indexes/{id}", handler.handleGetIndex)
 	r.Post("/indexes", handler.handleCreateIndex)
 	r.Post("/indexes/{id}/documents", handler.handleIngestDocument)
+
+	// Mapping endpoints
+	r.Get("/indexes/{id}/mapping", handler.handleGetMapping)
+	r.Put("/indexes/{id}/mapping", handler.handleUpdateMapping)
 }
 
 type handler struct {
@@ -42,6 +47,7 @@ type createIndexRequest struct {
 	DefaultAnalyzer  string                   `json:"default_analyzer"`
 	DefaultTokenizer string                   `json:"default_tokenizer"`
 	MappingVersion   int                      `json:"mapping_version"`
+	Dynamic          string                   `json:"dynamic"` // "true", "false", "strict"
 	FieldMappings    []createFieldMappingBody `json:"field_mappings"`
 	InitialShardKeys []string                 `json:"initial_shard_keys"`
 }
@@ -272,6 +278,11 @@ func (h *handler) handleIngestDocument(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 		case errors.As(err, &validationErr):
 			http.Error(w, validationErr.Error(), http.StatusBadRequest)
+		case errors.Is(err, mappings.ErrFieldTypeConflict),
+			errors.Is(err, mappings.ErrStrictModeViolation):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		case strings.Contains(err.Error(), "mapping validation failed"):
+			http.Error(w, err.Error(), http.StatusBadRequest)
 		default:
 			http.Error(w, err.Error(), http.StatusBadGateway)
 		}
@@ -434,4 +445,156 @@ func toShardConfigResponse(cfg indexes.ShardConfig) shardConfigResponse {
 		}
 	}
 	return resp
+}
+
+// Mapping endpoint types and handlers
+
+type mappingResponse struct {
+	IndexID   string                 `json:"index_id"`
+	Version   int                    `json:"version"`
+	Dynamic   string                 `json:"dynamic"`
+	Fields    []fieldMappingResponse `json:"fields"`
+	CreatedAt time.Time              `json:"created_at"`
+	UpdatedAt time.Time              `json:"updated_at"`
+}
+
+type updateMappingRequest struct {
+	Dynamic *string                  `json:"dynamic,omitempty"` // "true", "false", "strict"
+	Fields  []createFieldMappingBody `json:"fields,omitempty"`
+}
+
+func (h *handler) handleGetMapping(w http.ResponseWriter, r *http.Request) {
+	ctx, span := tracer.Start(r.Context(), "cluster.getMapping")
+	defer span.End()
+
+	indexID := chi.URLParam(r, "id")
+	if strings.TrimSpace(indexID) == "" {
+		http.Error(w, "missing index id in path", http.StatusBadRequest)
+		return
+	}
+
+	mapping, err := h.coord.GetMapping(ctx, indexID)
+	if err != nil {
+		if errors.Is(err, mappings.ErrMappingNotFound) {
+			http.Error(w, "mapping not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "failed to fetch mapping", http.StatusInternalServerError)
+		return
+	}
+
+	resp := mappingResponse{
+		IndexID:   mapping.IndexID,
+		Version:   mapping.Version,
+		Dynamic:   string(mapping.Dynamic),
+		Fields:    make([]fieldMappingResponse, 0, len(mapping.Fields)),
+		CreatedAt: mapping.CreatedAt,
+		UpdatedAt: mapping.UpdatedAt,
+	}
+
+	for _, f := range mapping.Fields {
+		resp.Fields = append(resp.Fields, fieldMappingResponse{
+			Name:      f.Name,
+			Type:      string(f.Type),
+			Analyzer:  f.Analyzer,
+			Tokenizer: f.Tokenizer,
+			Stored:    f.Stored,
+			Required:  f.Required,
+			Index:     f.Indexed,
+		})
+	}
+
+	clusterhttputil.WriteJSON(w, http.StatusOK, resp)
+}
+
+func (h *handler) handleUpdateMapping(w http.ResponseWriter, r *http.Request) {
+	ctx, span := tracer.Start(r.Context(), "cluster.updateMapping")
+	defer span.End()
+
+	indexID := chi.URLParam(r, "id")
+	if strings.TrimSpace(indexID) == "" {
+		http.Error(w, "missing index id in path", http.StatusBadRequest)
+		return
+	}
+
+	var req updateMappingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request payload", http.StatusBadRequest)
+		return
+	}
+
+	mappingsSvc := h.coord.MappingsService()
+	if mappingsSvc == nil {
+		http.Error(w, "mappings service unavailable", http.StatusInternalServerError)
+		return
+	}
+
+	// Update dynamic mode if provided
+	if req.Dynamic != nil {
+		mode := mappings.DynamicMode(*req.Dynamic)
+		if err := mappingsSvc.SetDynamic(ctx, indexID, mode); err != nil {
+			http.Error(w, fmt.Sprintf("failed to update dynamic mode: %v", err), http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Add new fields if provided
+	if len(req.Fields) > 0 {
+		fields := make([]mappings.Field, 0, len(req.Fields))
+		for _, f := range req.Fields {
+			field := mappings.Field{
+				Name:      f.Name,
+				Type:      mappings.FieldType(f.Type),
+				Analyzer:  f.Analyzer,
+				Tokenizer: f.Tokenizer,
+				Stored:    f.Stored != nil && *f.Stored,
+				Required:  f.Required != nil && *f.Required,
+			}
+			if f.Index != nil {
+				field.Indexed = *f.Index
+			} else {
+				field.Indexed = true
+			}
+			fields = append(fields, field)
+		}
+
+		if err := mappingsSvc.AddFields(ctx, indexID, fields); err != nil {
+			if errors.Is(err, mappings.ErrFieldExists) {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
+			http.Error(w, fmt.Sprintf("failed to add fields: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Return updated mapping
+	mapping, err := h.coord.GetMapping(ctx, indexID)
+	if err != nil {
+		http.Error(w, "failed to fetch updated mapping", http.StatusInternalServerError)
+		return
+	}
+
+	resp := mappingResponse{
+		IndexID:   mapping.IndexID,
+		Version:   mapping.Version,
+		Dynamic:   string(mapping.Dynamic),
+		Fields:    make([]fieldMappingResponse, 0, len(mapping.Fields)),
+		CreatedAt: mapping.CreatedAt,
+		UpdatedAt: mapping.UpdatedAt,
+	}
+
+	for _, f := range mapping.Fields {
+		resp.Fields = append(resp.Fields, fieldMappingResponse{
+			Name:      f.Name,
+			Type:      string(f.Type),
+			Analyzer:  f.Analyzer,
+			Tokenizer: f.Tokenizer,
+			Stored:    f.Stored,
+			Required:  f.Required,
+			Index:     f.Indexed,
+		})
+	}
+
+	clusterhttputil.WriteJSON(w, http.StatusOK, resp)
 }

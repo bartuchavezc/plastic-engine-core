@@ -73,13 +73,15 @@ func TestMetadataResolverFetchesWhenFieldsMissing(t *testing.T) {
 	}
 }
 
-func TestMetadataResolverVersionMismatch(t *testing.T) {
+func TestMetadataResolverVersionMismatch_FetchesLatest(t *testing.T) {
 	t.Parallel()
 
+	// When there's a version mismatch, the resolver should fetch the latest
+	// from the coordinator and return it (no error).
 	fetcher := &stubDefinitionFetcher{
 		definition: indexes.IndexDefinition{
 			ID:               "idx",
-			MappingVersion:   1,
+			MappingVersion:   3, // Coordinator has version 3
 			DefaultAnalyzer:  "simple",
 			DefaultTokenizer: "whitespace",
 		},
@@ -87,12 +89,55 @@ func TestMetadataResolverVersionMismatch(t *testing.T) {
 
 	resolver := document.NewMetadataResolver(fetcher)
 
-	_, err := resolver.Resolve(context.Background(), shards.Assignment{
+	// Assignment has version 2, but coordinator has version 3
+	def, err := resolver.Resolve(context.Background(), shards.Assignment{
 		IndexID:        "idx",
 		MappingVersion: 2,
 	})
-	if err == nil {
-		t.Fatalf("expected error on version mismatch")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	// Should return the fetched version (3), not the assignment version (2)
+	if def.MappingVersion != 3 {
+		t.Errorf("MappingVersion = %d, want 3", def.MappingVersion)
+	}
+	if fetcher.calls != 1 {
+		t.Errorf("fetcher calls = %d, want 1", fetcher.calls)
+	}
+}
+
+func TestMetadataResolverGetLocalVersion(t *testing.T) {
+	t.Parallel()
+
+	fetcher := &stubDefinitionFetcher{
+		definition: indexes.IndexDefinition{
+			ID:               "idx",
+			MappingVersion:   5,
+			DefaultAnalyzer:  "simple",
+			DefaultTokenizer: "whitespace",
+		},
+	}
+
+	resolver := document.NewMetadataResolver(fetcher)
+
+	// Before any fetch, local version should be 0
+	if got := resolver.GetLocalVersion("idx"); got != 0 {
+		t.Errorf("GetLocalVersion (before fetch) = %d, want 0", got)
+	}
+
+	// Fetch the definition
+	_, err := resolver.Resolve(context.Background(), shards.Assignment{
+		IndexID:        "idx",
+		MappingVersion: 5,
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	// After fetch, local version should match
+	if got := resolver.GetLocalVersion("idx"); got != 5 {
+		t.Errorf("GetLocalVersion (after fetch) = %d, want 5", got)
 	}
 }
 

@@ -36,3 +36,11 @@ type HeartbeatRequest struct {
 	Shards []string `json:"shards"`
 }
 
+// HeartbeatResponse contains information returned to the node after a heartbeat.
+type HeartbeatResponse struct {
+	Status string `json:"status"`
+	// MappingUpdates maps index IDs to their current mapping versions.
+	// Nodes should compare with their local versions and fetch updated mappings if needed.
+	MappingUpdates map[string]int `json:"mapping_updates,omitempty"`
+}
+

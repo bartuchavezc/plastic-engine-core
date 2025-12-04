@@ -101,11 +101,11 @@ func (s *stubClusterClient) Join(ctx context.Context, info node.NodeInfo) (node.
 	return s.joinResp, s.joinErr
 }
 
-func (s *stubClusterClient) Heartbeat(ctx context.Context, report node.HeartbeatReport) error {
+func (s *stubClusterClient) Heartbeat(ctx context.Context, report node.HeartbeatReport) (node.HeartbeatResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.heartbeatCalls = append(s.heartbeatCalls, report)
-	return s.heartbeatErr
+	return node.HeartbeatResponse{Status: "ok"}, s.heartbeatErr
 }
 
 func waitForCalls(client *stubClusterClient, minCalls int, timeout time.Duration) error {

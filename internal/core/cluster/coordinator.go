@@ -12,6 +12,7 @@ import (
 
 	"plastic-engine-core/internal/core/cluster/documents"
 	"plastic-engine-core/internal/core/cluster/indexes"
+	"plastic-engine-core/internal/core/cluster/mappings"
 	"plastic-engine-core/internal/core/cluster/nodes"
 	"plastic-engine-core/internal/core/cluster/shards"
 	"plastic-engine-core/internal/pkg/logger"
@@ -26,10 +27,11 @@ type Coordinator struct {
 	db   *sql.DB
 	log  logger.Logger
 
-	applier     StateApplier
-	indexRepo   *indexes.Repository
-	nodesSvc    *nodes.Service
-	shardsSvc   *shards.Service
+	applier         StateApplier
+	indexRepo       *indexes.Repository
+	nodesSvc        *nodes.Service
+	shardsSvc       *shards.Service
+	mappingsSvc     *mappings.Service
 	documentsRouter *documents.Router
 }
 
@@ -76,8 +78,10 @@ func NewCoordinatorWithConfig(cfg CoordinatorConfig) (*Coordinator, error) {
 
 	indexRepo := indexes.NewRepository(db)
 	shardsSvc := shards.NewService(db, log)
+	mappingsRepo := mappings.NewSQLiteRepository(db)
+	mappingsSvc := mappings.NewService(mappingsRepo)
 	nodesSvc := nodes.NewService(db, shardsSvc, indexRepo, log)
-	docRouter := documents.NewRouter(db, indexRepo, httpClient, log)
+	docRouter := documents.NewRouter(db, indexRepo, mappingsSvc, httpClient, log)
 
 	return &Coordinator{
 		Role:            cfg.Role,
@@ -88,6 +92,7 @@ func NewCoordinatorWithConfig(cfg CoordinatorConfig) (*Coordinator, error) {
 		indexRepo:       indexRepo,
 		nodesSvc:        nodesSvc,
 		shardsSvc:       shardsSvc,
+		mappingsSvc:     mappingsSvc,
 		documentsRouter: docRouter,
 	}, nil
 }
@@ -111,8 +116,10 @@ func NewCoordinatorWithDeps(db *sql.DB, applier StateApplier, log logger.Logger)
 
 	indexRepo := indexes.NewRepository(db)
 	shardsSvc := shards.NewService(db, log)
+	mappingsRepo := mappings.NewSQLiteRepository(db)
+	mappingsSvc := mappings.NewService(mappingsRepo)
 	nodesSvc := nodes.NewService(db, shardsSvc, indexRepo, log)
-	docRouter := documents.NewRouter(db, indexRepo, httpClient, log)
+	docRouter := documents.NewRouter(db, indexRepo, mappingsSvc, httpClient, log)
 
 	return &Coordinator{
 		db:              db,
@@ -121,6 +128,7 @@ func NewCoordinatorWithDeps(db *sql.DB, applier StateApplier, log logger.Logger)
 		indexRepo:       indexRepo,
 		nodesSvc:        nodesSvc,
 		shardsSvc:       shardsSvc,
+		mappingsSvc:     mappingsSvc,
 		documentsRouter: docRouter,
 	}, nil
 }
@@ -172,6 +180,19 @@ func (c *Coordinator) NodesService() *nodes.Service {
 // ShardsService returns the shards service for external use.
 func (c *Coordinator) ShardsService() *shards.Service {
 	return c.shardsSvc
+}
+
+// MappingsService returns the mappings service for external use.
+func (c *Coordinator) MappingsService() *mappings.Service {
+	return c.mappingsSvc
+}
+
+// GetMapping retrieves the mapping for an index.
+func (c *Coordinator) GetMapping(ctx context.Context, indexID string) (mappings.Mapping, error) {
+	if c == nil || c.mappingsSvc == nil {
+		return mappings.Mapping{}, errors.New("coordinator not initialised")
+	}
+	return c.mappingsSvc.Get(ctx, indexID)
 }
 
 // CreateIndex registers a new index definition in the metadata store.

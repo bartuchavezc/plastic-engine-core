@@ -15,7 +15,7 @@ import (
 // ClusterClient abstracts the coordinator API the search node depends on.
 type ClusterClient interface {
 	Join(ctx context.Context, info NodeInfo) (JoinResponse, error)
-	Heartbeat(ctx context.Context, report HeartbeatReport) error
+	Heartbeat(ctx context.Context, report HeartbeatReport) (HeartbeatResponse, error)
 }
 
 // NodeInfo captures how this node identifies itself to the cluster.
@@ -38,13 +38,28 @@ type HeartbeatReport struct {
 	Shards []string
 }
 
+// HeartbeatResponse contains information returned from the coordinator after a heartbeat.
+type HeartbeatResponse struct {
+	Status string
+	// MappingUpdates maps index IDs to their current mapping versions.
+	// Nodes should compare with their local versions and fetch updated mappings if needed.
+	MappingUpdates map[string]int
+}
+
+// MappingRefresher handles refreshing index mappings when updates are detected.
+type MappingRefresher interface {
+	RefreshMapping(ctx context.Context, indexID string) error
+	GetLocalVersion(indexID string) int
+}
+
 // SearchNode encapsulates the behaviour of a search role node.
 type SearchNode struct {
-	Info          NodeInfo
-	JoinAddress   string
-	ClusterClient ClusterClient
-	ShardManager  *shards.Manager
-	Logger        logger.Logger
+	Info             NodeInfo
+	JoinAddress      string
+	ClusterClient    ClusterClient
+	ShardManager     *shards.Manager
+	MappingRefresher MappingRefresher // Optional: handles mapping updates
+	Logger           logger.Logger
 }
 
 // New instantiates a SearchNode ready to initialise.
@@ -110,12 +125,44 @@ func (n *SearchNode) StartHeartbeat(ctx context.Context, interval time.Duration)
 					Shards: n.ShardManager.ListShardIDs(),
 				}
 
-				if err := n.ClusterClient.Heartbeat(ctx, report); err != nil {
+				resp, err := n.ClusterClient.Heartbeat(ctx, report)
+				if err != nil {
 					n.Logger.Error("heartbeat failed", logger.Field{Key: "error", Value: err})
+					continue
+				}
+
+				// Process mapping updates if available
+				if len(resp.MappingUpdates) > 0 {
+					n.processMappingUpdates(ctx, resp.MappingUpdates)
 				}
 			}
 		}
 	}()
+}
+
+// processMappingUpdates checks for mapping version changes and triggers refreshes.
+func (n *SearchNode) processMappingUpdates(ctx context.Context, updates map[string]int) {
+	if n.MappingRefresher == nil {
+		return
+	}
+
+	for indexID, newVersion := range updates {
+		localVersion := n.MappingRefresher.GetLocalVersion(indexID)
+		if newVersion > localVersion {
+			n.Logger.Info("mapping update detected",
+				logger.Field{Key: "index_id", Value: indexID},
+				logger.Field{Key: "local_version", Value: localVersion},
+				logger.Field{Key: "new_version", Value: newVersion},
+			)
+
+			if err := n.MappingRefresher.RefreshMapping(ctx, indexID); err != nil {
+				n.Logger.Error("failed to refresh mapping",
+					logger.Field{Key: "index_id", Value: indexID},
+					logger.Field{Key: "error", Value: err},
+				)
+			}
+		}
+	}
 }
 
 func (n *SearchNode) nodeIDFilePath() string {

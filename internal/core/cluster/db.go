@@ -75,6 +75,7 @@ func initializeCoordinatorSchema(db *sql.DB) error {
 			default_analyzer TEXT NOT NULL,
 			default_tokenizer TEXT NOT NULL,
 			mapping_version INTEGER NOT NULL DEFAULT 1,
+			dynamic_mode TEXT NOT NULL DEFAULT 'true',
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL
 		);`,
@@ -149,6 +150,13 @@ func initializeCoordinatorSchema(db *sql.DB) error {
 	if _, err := db.Exec(`ALTER TABLE index_fields ADD COLUMN is_indexed INTEGER NOT NULL DEFAULT 1`); err != nil {
 		if !strings.Contains(err.Error(), "duplicate column name") {
 			return fmt.Errorf("add index_fields.is_indexed column: %w", err)
+		}
+	}
+
+	// Migration: add dynamic_mode column for dynamic mapping support
+	if _, err := db.Exec(`ALTER TABLE indexes ADD COLUMN dynamic_mode TEXT NOT NULL DEFAULT 'true'`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("add indexes.dynamic_mode column: %w", err)
 		}
 	}
 

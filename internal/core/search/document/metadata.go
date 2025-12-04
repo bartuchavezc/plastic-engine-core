@@ -31,11 +31,14 @@ func NewMetadataResolver(fetcher DefinitionFetcher) *MetadataResolver {
 }
 
 // Resolve returns an up-to-date index definition for the given assignment.
+// If the cached version is outdated, it fetches the latest from the coordinator.
 func (r *MetadataResolver) Resolve(ctx context.Context, assignment shards.Assignment) (indexes.IndexDefinition, error) {
+	// Check cache first with exact version match
 	if def, ok := r.loadFromCache(assignment.IndexID, assignment.MappingVersion); ok {
 		return def, nil
 	}
 
+	// If assignment has embedded fields, use them directly
 	if len(assignment.Fields) > 0 {
 		def := indexes.IndexDefinition{
 			ID:               assignment.IndexID,
@@ -49,6 +52,7 @@ func (r *MetadataResolver) Resolve(ctx context.Context, assignment shards.Assign
 		return def, nil
 	}
 
+	// Fetch from coordinator
 	if r.fetcher == nil {
 		return indexes.IndexDefinition{}, fmt.Errorf("no index definition for %s and fetcher unavailable", assignment.IndexID)
 	}
@@ -60,14 +64,45 @@ func (r *MetadataResolver) Resolve(ctx context.Context, assignment shards.Assign
 
 	r.store(def)
 
-	if def.MappingVersion != assignment.MappingVersion {
-		return indexes.IndexDefinition{}, fmt.Errorf(
-			"index %s mapping version mismatch. assignment=%d fetched=%d",
-			assignment.IndexID, assignment.MappingVersion, def.MappingVersion,
-		)
+	// Return the fetched definition even if version differs
+	// The caller should handle version mismatches appropriately
+	return def, nil
+}
+
+// RefreshMapping fetches the latest mapping for an index from the coordinator.
+// This implements part of the search.MappingRefresher interface.
+func (r *MetadataResolver) RefreshMapping(ctx context.Context, indexID string) error {
+	if r.fetcher == nil {
+		return fmt.Errorf("fetcher unavailable")
 	}
 
-	return def, nil
+	def, err := r.fetcher.FetchIndexDefinition(ctx, indexID)
+	if err != nil {
+		return fmt.Errorf("fetch index definition %s: %w", indexID, err)
+	}
+
+	r.store(def)
+	return nil
+}
+
+// GetLocalVersion returns the cached mapping version for an index.
+// Returns 0 if the index is not in cache.
+// This implements part of the search.MappingRefresher interface.
+func (r *MetadataResolver) GetLocalVersion(indexID string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if def, ok := r.cache[indexID]; ok {
+		return def.MappingVersion
+	}
+	return 0
+}
+
+// Invalidate removes an index from the cache, forcing a refresh on next access.
+func (r *MetadataResolver) Invalidate(indexID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.cache, indexID)
 }
 
 func (r *MetadataResolver) loadFromCache(indexID string, version int) (indexes.IndexDefinition, bool) {

@@ -62,7 +62,7 @@ func TestListNodesReturnsHeartbeat(t *testing.T) {
 		t.Fatalf("Join: %v", err)
 	}
 
-	if err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{NodeID: "node-admin-test"}); err != nil {
+	if _, err := coord.NodesService().Heartbeat(ctx, nodes.HeartbeatRequest{NodeID: "node-admin-test"}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
 

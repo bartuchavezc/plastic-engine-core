@@ -77,10 +77,14 @@ func handleHeartbeat(w http.ResponseWriter, r *http.Request, joinService *nodes.
 		attribute.String("cluster.node_id", req.NodeID),
 	)
 
-	if err := joinService.Heartbeat(ctx, req); err != nil {
+	resp, err := joinService.Heartbeat(ctx, req)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	// Return response with mapping updates if any
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(resp)
 }

@@ -169,3 +169,43 @@ func (r *Repository) DB() *sql.DB {
 	return r.db
 }
 
+// GetIndexIDsForShards returns the unique index IDs for the given shard IDs.
+func (r *Repository) GetIndexIDsForShards(ctx context.Context, shardIDs []string) ([]string, error) {
+	if len(shardIDs) == 0 {
+		return nil, nil
+	}
+
+	// Build query with placeholders
+	query := `SELECT DISTINCT index_id FROM shards WHERE id IN (`
+	args := make([]any, len(shardIDs))
+	for i, id := range shardIDs {
+		if i > 0 {
+			query += ","
+		}
+		query += "?"
+		args[i] = id
+	}
+	query += ")"
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query index ids for shards: %w", err)
+	}
+	defer rows.Close()
+
+	var indexIDs []string
+	for rows.Next() {
+		var indexID string
+		if err := rows.Scan(&indexID); err != nil {
+			return nil, fmt.Errorf("scan index id: %w", err)
+		}
+		indexIDs = append(indexIDs, indexID)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate index ids: %w", err)
+	}
+
+	return indexIDs, nil
+}
+

@@ -15,6 +15,7 @@ import (
 
 	"plastic-engine-core/internal/core/cluster/indexes"
 	"plastic-engine-core/internal/core/cluster/indexes/sharding"
+	"plastic-engine-core/internal/core/cluster/mappings"
 	"plastic-engine-core/internal/core/cluster/shards"
 	"plastic-engine-core/internal/pkg/logger"
 )
@@ -24,24 +25,32 @@ type IndexRepository interface {
 	GetIndex(ctx context.Context, id string) (indexes.IndexDefinition, error)
 }
 
+// MappingsService handles dynamic mapping and field validation.
+type MappingsService interface {
+	ProcessDocument(ctx context.Context, indexID string, doc map[string]any) ([]mappings.Field, error)
+	AddFields(ctx context.Context, indexID string, fields []mappings.Field) error
+}
+
 // Router encapsulates the dependencies required to execute the ingestion workflow.
 type Router struct {
-	IndexRepo  IndexRepository
-	ShardRepo  *shards.Repository
-	HTTPClient *http.Client
-	Logger     logger.Logger
+	IndexRepo   IndexRepository
+	ShardRepo   *shards.Repository
+	MappingsSvc MappingsService
+	HTTPClient  *http.Client
+	Logger      logger.Logger
 }
 
 // NewRouter creates a document router.
-func NewRouter(db *sql.DB, indexRepo IndexRepository, httpClient *http.Client, log logger.Logger) *Router {
+func NewRouter(db *sql.DB, indexRepo IndexRepository, mappingsSvc MappingsService, httpClient *http.Client, log logger.Logger) *Router {
 	if log == nil {
 		log = logger.DefaultLogger()
 	}
 	return &Router{
-		IndexRepo:  indexRepo,
-		ShardRepo:  shards.NewRepository(db),
-		HTTPClient: httpClient,
-		Logger:     log,
+		IndexRepo:   indexRepo,
+		ShardRepo:   shards.NewRepository(db),
+		MappingsSvc: mappingsSvc,
+		HTTPClient:  httpClient,
+		Logger:      log,
 	}
 }
 
@@ -67,6 +76,34 @@ func (r *Router) Handle(ctx context.Context, req Request) error {
 	def, err := r.IndexRepo.GetIndex(ctx, req.IndexID)
 	if err != nil {
 		return err
+	}
+
+	// Process document for dynamic mapping (infer new fields, validate types)
+	if r.MappingsSvc != nil && len(req.Payload) > 0 {
+		var doc map[string]any
+		if err := json.Unmarshal(req.Payload, &doc); err == nil && doc != nil {
+			newFields, err := r.MappingsSvc.ProcessDocument(ctx, req.IndexID, doc)
+			if err != nil {
+				return fmt.Errorf("mapping validation failed: %w", err)
+			}
+
+			// Persist new fields if dynamic mapping added them
+			if len(newFields) > 0 {
+				if err := r.MappingsSvc.AddFields(ctx, req.IndexID, newFields); err != nil {
+					return fmt.Errorf("persist inferred fields: %w", err)
+				}
+				r.Logger.Info("dynamic mapping: added fields",
+					logger.Field{Key: "index_id", Value: req.IndexID},
+					logger.Field{Key: "count", Value: len(newFields)},
+				)
+
+				// Refresh index definition to include new fields
+				def, err = r.IndexRepo.GetIndex(ctx, req.IndexID)
+				if err != nil {
+					return err
+				}
+			}
+		}
 	}
 
 	normalizedPayload, err := NormalizePayload(def, req.Payload)
@@ -97,11 +134,12 @@ func (r *Router) Handle(ctx context.Context, req Request) error {
 	}
 
 	forwardPayload := map[string]any{
-		"index_id":    req.IndexID,
-		"shard_id":    shardInfo.ID,
-		"document_id": req.DocumentID,
-		"routing":     req.Routing,
-		"payload":     normalizedPayload,
+		"index_id":        req.IndexID,
+		"shard_id":        shardInfo.ID,
+		"document_id":     req.DocumentID,
+		"routing":         req.Routing,
+		"payload":         normalizedPayload,
+		"mapping_version": def.MappingVersion,
 	}
 
 	body, err := json.Marshal(forwardPayload)

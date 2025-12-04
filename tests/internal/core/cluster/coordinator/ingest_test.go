@@ -22,6 +22,7 @@ func TestRouterReturnsShardNotFound(t *testing.T) {
 	router := documents.NewRouter(
 		openTestDB(t),
 		&staticIndexRepo{},
+		nil, // no mappings service
 		http.DefaultClient,
 		logger.DefaultLogger(),
 	)
@@ -56,6 +57,7 @@ func TestRouterForwardsDocument(t *testing.T) {
 	router := documents.NewRouter(
 		db,
 		&staticIndexRepo{},
+		nil, // no mappings service
 		server.Client(),
 		logger.DefaultLogger(),
 	)
@@ -99,6 +101,7 @@ func TestRouterValidatesRequiredFields(t *testing.T) {
 	router := documents.NewRouter(
 		db,
 		&staticIndexRepo{},
+		nil, // no mappings service
 		http.DefaultClient,
 		logger.DefaultLogger(),
 	)
