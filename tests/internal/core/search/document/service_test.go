@@ -8,15 +8,15 @@ import (
 
 	indexes "plastic-engine-core/internal/core/cluster/indexes"
 	"plastic-engine-core/internal/core/search/document"
+	"plastic-engine-core/internal/core/search/segment"
 	shards "plastic-engine-core/internal/core/search/shards"
-	"plastic-engine-core/internal/adapters/storage/pebble"
 	"plastic-engine-core/internal/pkg/logger"
 )
 
 func TestServiceIndexPersistsDocument(t *testing.T) {
 	t.Parallel()
 
-	service, store := newTestService(t)
+	service, segMgr := newTestService(t)
 
 	cmd := document.Command{
 		IndexID:    "idx",
@@ -29,16 +29,22 @@ func TestServiceIndexPersistsDocument(t *testing.T) {
 		t.Fatalf("Index: %v", err)
 	}
 
-	// Wait for forward index to be written (async worker)
+	// Wait for document to be indexed (async worker)
 	requireEventually(t, 500*time.Millisecond, func() bool {
-		_, err := store.Get("fwd:doc-1")
-		return err == nil
+		hits, err := segMgr.Search(context.Background(), "title", "hello")
+		return err == nil && len(hits) > 0
 	})
 
-	// Verify term registry was created
-	_, err := store.Get(pebble.TermRegistryKey("title", "hello"))
+	// Verify we can search for the term
+	hits, err := segMgr.Search(context.Background(), "title", "hello")
 	if err != nil {
-		t.Fatalf("expected term registry entry, got %v", err)
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatalf("expected at least 1 hit")
+	}
+	if hits[0].DocID != "doc-1" {
+		t.Fatalf("expected doc-1, got %s", hits[0].DocID)
 	}
 }
 
@@ -78,7 +84,7 @@ func TestServiceIndexMissingShard(t *testing.T) {
 	}
 }
 
-func newTestService(t *testing.T) (*document.Service, *pebble.PebbleStore) {
+func newTestService(t *testing.T) (*document.Service, *segment.Manager) {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -110,8 +116,8 @@ func newTestService(t *testing.T) (*document.Service, *pebble.PebbleStore) {
 	provider := document.NewAssignmentProvider(manager, resolver)
 	planner := document.NewFieldPlanner(document.TokenizerFactory{}, document.AnalyzerFactory{})
 
-	writerFactory := func(s *shards.Shard) *document.IndexWriter {
-		return document.NewIndexWriter(s.Store, nil)
+	writerFactory := func(s *shards.Shard) document.DocumentIndexWriter {
+		return document.NewSegmentIndexWriter(s.Segments, nil)
 	}
 
 	cfg := document.ShardWorkerConfig{
@@ -121,6 +127,7 @@ func newTestService(t *testing.T) (*document.Service, *pebble.PebbleStore) {
 
 	service := document.NewService(manager, provider, planner, writerFactory, cfg, logger.DefaultLogger())
 	t.Cleanup(service.Close)
+	t.Cleanup(func() { manager.Close() })
 
-	return service, sh.Store
+	return service, sh.Segments
 }

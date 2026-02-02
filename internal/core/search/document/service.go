@@ -27,7 +27,8 @@ type WorkItem struct {
 	Command Command
 }
 
-type WriterFactory func(shard *shards.Shard) *IndexWriter
+// WriterFactory creates a DocumentIndexWriter for a shard.
+type WriterFactory func(shard *shards.Shard) DocumentIndexWriter
 
 type Service struct {
 	shards        *shards.Manager

@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"sync"
 
-	"plastic-engine-core/internal/adapters/storage/pebble"
 	"plastic-engine-core/internal/core/cluster/indexes"
+	"plastic-engine-core/internal/core/search/segment"
 )
+
+// Note: Migrated from pebble to segment-based storage
 
 // Assignment describes how a shard should look when assigned to this node.
 type Assignment struct {
@@ -72,14 +74,19 @@ func (m *Manager) ensureLocalShard(assignment Assignment) error {
 
 		m.mu.Lock()
 		existing.Info = assignment
-		// Reopen store if it's closed (e.g., after restart)
-		if existing.Store == nil {
-			store, err := pebble.NewPebbleStore(m.shardPath(assignment.ID))
+		// Reopen segment manager if it's closed (e.g., after restart)
+		if existing.Segments == nil {
+			segmentMgr, err := segment.NewManager(segment.Config{
+				FlushThreshold:      1000,
+				MaxSegmentsPerLevel: 5,
+				LevelSizeMultiplier: 10,
+				DataDir:             m.shardPath(assignment.ID),
+			})
 			if err != nil {
 				m.mu.Unlock()
-				return fmt.Errorf("reopen pebble store for shard %s: %w", assignment.ID, err)
+				return fmt.Errorf("reopen segment manager for shard %s: %w", assignment.ID, err)
 			}
-			existing.Store = store
+			existing.Segments = segmentMgr
 		}
 		m.mu.Unlock()
 		return nil
@@ -104,14 +111,19 @@ func (m *Manager) openShard(assignment Assignment) error {
 		return fmt.Errorf("write manifest for shard %s: %w", assignment.ID, err)
 	}
 
-	store, err := pebble.NewPebbleStore(shardPath)
+	segmentMgr, err := segment.NewManager(segment.Config{
+		FlushThreshold:      1000,
+		MaxSegmentsPerLevel: 5,
+		LevelSizeMultiplier: 10,
+		DataDir:             shardPath,
+	})
 	if err != nil {
-		return fmt.Errorf("open pebble for shard %s: %w", assignment.ID, err)
+		return fmt.Errorf("open segment manager for shard %s: %w", assignment.ID, err)
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.shards[assignment.ID] = &Shard{ID: assignment.ID, Store: store, Info: assignment}
+	m.shards[assignment.ID] = &Shard{ID: assignment.ID, Segments: segmentMgr, Info: assignment}
 	return nil
 }
 
@@ -120,7 +132,7 @@ func (m *Manager) shardPath(id string) string {
 }
 
 func (m *Manager) replicateShard(assignment Assignment) {
-	// TODO: implement replication pipeline (snapshot, copy SSTables, validation, open Pebble, mark ready).
+	// TODO: implement replication pipeline (snapshot, copy segments, validation, open segment manager, mark ready).
 }
 
 func (m *Manager) existsLocal(id string) bool {
@@ -130,17 +142,17 @@ func (m *Manager) existsLocal(id string) bool {
 	return ok
 }
 
-// Close releases all open Pebble stores managed by the shard manager.
+// Close releases all segment managers managed by the shard manager.
 func (m *Manager) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	var firstErr error
 	for id, shard := range m.shards {
-		if shard.Store == nil {
+		if shard.Segments == nil {
 			continue
 		}
-		if err := shard.Store.Close(); err != nil && firstErr == nil {
+		if err := shard.Segments.Close(); err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("close shard %s: %w", id, err)
 		}
 	}
@@ -184,9 +196,9 @@ func (m *Manager) UnloadIndex(indexID string) error {
 			continue
 		}
 
-		// Close the Pebble store
-		if shard.Store != nil {
-			if err := shard.Store.Close(); err != nil && firstErr == nil {
+		// Close the segment manager
+		if shard.Segments != nil {
+			if err := shard.Segments.Close(); err != nil && firstErr == nil {
 				firstErr = fmt.Errorf("close shard %s: %w", id, err)
 			}
 		}
@@ -257,13 +269,18 @@ func (m *Manager) loadExistingShards() error {
 			continue
 		}
 
-		store, err := pebble.NewPebbleStore(shardPath)
+		segmentMgr, err := segment.NewManager(segment.Config{
+			FlushThreshold:      1000,
+			MaxSegmentsPerLevel: 5,
+			LevelSizeMultiplier: 10,
+			DataDir:             shardPath,
+		})
 		if err != nil {
 			return fmt.Errorf("open existing shard %s: %w", id, err)
 		}
 
 		m.mu.Lock()
-		m.shards[id] = &Shard{ID: id, Store: store, Info: assignment}
+		m.shards[id] = &Shard{ID: id, Segments: segmentMgr, Info: assignment}
 		m.mu.Unlock()
 	}
 

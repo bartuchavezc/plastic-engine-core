@@ -1,12 +1,12 @@
 package shards
 
 import (
-	"plastic-engine-core/internal/adapters/storage/pebble"
+	"plastic-engine-core/internal/core/search/segment"
 )
 
-// Shard represents a shard already opened locally with Pebble.
+// Shard represents a shard with its segment-based index.
 type Shard struct {
-	ID    string
-	Store *pebble.PebbleStore
-	Info  Assignment
+	ID       string
+	Segments *segment.Manager
+	Info     Assignment
 }

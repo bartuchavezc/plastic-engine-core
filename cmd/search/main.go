@@ -131,8 +131,8 @@ func main() {
 
 	assignmentProvider := document.NewAssignmentProvider(manager, resolver)
 	planner := document.NewFieldPlanner(document.TokenizerFactory{}, document.AnalyzerFactory{})
-	writerFactory := func(sh *shards.Shard) *document.IndexWriter {
-		return document.NewIndexWriter(sh.Store, log)
+	writerFactory := func(sh *shards.Shard) document.DocumentIndexWriter {
+		return document.NewSegmentIndexWriter(sh.Segments, log)
 	}
 
 	workerCfg := document.ShardWorkerConfig{
@@ -143,15 +143,15 @@ func main() {
 	indexService := document.NewService(manager, assignmentProvider, planner, writerFactory, workerCfg, log)
 	defer indexService.Close()
 
-	// Create search service with shard store getter
-	getShardStore := func(shardID string) (searchquery.ShardStore, bool) {
+	// Create search service with segment manager getter
+	getSegmentManager := func(shardID string) (searchquery.SegmentManager, bool) {
 		shard, ok := manager.GetShard(shardID)
 		if !ok {
 			return nil, false
 		}
-		return shard.Store, true
+		return shard.Segments, true
 	}
-	searchService := searchquery.NewSearchService(getShardStore, log)
+	searchService := searchquery.NewSegmentSearchService(getSegmentManager, log)
 
 	// Build router with observability middleware
 	baseRouter := searchhttp.NewRouter(indexService, searchService, manager, log)

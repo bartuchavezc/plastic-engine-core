@@ -40,6 +40,11 @@ func (c *ShardWorkerConfig) applyDefaults() {
 	// RefreshTime = 0 means immediate (no batching)
 }
 
+// DocumentIndexWriter is the interface for document indexing.
+type DocumentIndexWriter interface {
+	IndexBatch(ctx context.Context, requests []DocumentWriteRequest) error
+}
+
 // ShardWorker processes indexing commands for a particular shard.
 type ShardWorker struct {
 	shardID string
@@ -50,7 +55,7 @@ type ShardWorker struct {
 	flushSignal chan struct{} // Signal for immediate flush requests
 
 	planBuilder *FieldPlanner
-	writer      *IndexWriter
+	writer      DocumentIndexWriter
 	assignments *AssignmentProvider
 
 	log logger.Logger
@@ -71,7 +76,7 @@ type batchedItem struct {
 }
 
 // NewShardWorker spins up worker goroutines ready to process commands.
-func NewShardWorker(shardID string, shard *shards.Shard, cfg ShardWorkerConfig, planner *FieldPlanner, writer *IndexWriter, assignments *AssignmentProvider, log logger.Logger) *ShardWorker {
+func NewShardWorker(shardID string, shard *shards.Shard, cfg ShardWorkerConfig, planner *FieldPlanner, writer DocumentIndexWriter, assignments *AssignmentProvider, log logger.Logger) *ShardWorker {
 	cfg.applyDefaults()
 
 	w := &ShardWorker{

@@ -24,17 +24,21 @@ type Response struct {
 	Cursor string `json:"cursor,omitempty"`
 }
 
-// ShardStoreGetter provides access to shard stores by ID.
+// ShardStoreGetter provides access to shard stores by ID (legacy Pebble-based).
 type ShardStoreGetter func(shardID string) (ShardStore, bool)
+
+// SegmentManagerGetter provides access to segment managers by shard ID.
+type SegmentManagerGetter func(shardID string) (SegmentManager, bool)
 
 // SearchService coordinates search across multiple shards.
 // It assumes shard routing has been resolved externally.
 type SearchService struct {
-	getShardStore ShardStoreGetter
-	log           logger.Logger
+	getShardStore     ShardStoreGetter    // Legacy Pebble-based (will be nil after migration)
+	getSegmentManager SegmentManagerGetter // Segment-based
+	log               logger.Logger
 }
 
-// NewSearchService creates a new search service.
+// NewSearchService creates a new search service (legacy Pebble-based).
 func NewSearchService(getter ShardStoreGetter, log logger.Logger) *SearchService {
 	if log == nil {
 		log = logger.DefaultLogger()
@@ -42,6 +46,17 @@ func NewSearchService(getter ShardStoreGetter, log logger.Logger) *SearchService
 	return &SearchService{
 		getShardStore: getter,
 		log:           log,
+	}
+}
+
+// NewSegmentSearchService creates a new search service using segment-based storage.
+func NewSegmentSearchService(getter SegmentManagerGetter, log logger.Logger) *SearchService {
+	if log == nil {
+		log = logger.DefaultLogger()
+	}
+	return &SearchService{
+		getSegmentManager: getter,
+		log:               log,
 	}
 }
 
@@ -129,22 +144,39 @@ func (s *SearchService) executeParallel(ctx context.Context, shardIDs []string, 
 }
 
 func (s *SearchService) executeOnShard(ctx context.Context, shardID string, req Request) ShardResult {
-	store, ok := s.getShardStore(shardID)
-	if !ok {
-		return ShardResult{
-			ShardID: shardID,
-			Error:   ErrShardNotFound,
+	// Try segment-based storage first
+	if s.getSegmentManager != nil {
+		segMgr, ok := s.getSegmentManager(shardID)
+		if ok {
+			executor := NewSegmentExecutor(shardID, segMgr)
+			hits, total, err := executor.Execute(ctx, req)
+			return ShardResult{
+				ShardID: shardID,
+				Hits:    hits,
+				Total:   total,
+				Error:   err,
+			}
 		}
 	}
 
-	executor := NewExecutor(shardID, store)
-	hits, total, err := executor.Execute(ctx, req)
+	// Fall back to legacy Pebble-based storage
+	if s.getShardStore != nil {
+		store, ok := s.getShardStore(shardID)
+		if ok {
+			executor := NewExecutor(shardID, store)
+			hits, total, err := executor.Execute(ctx, req)
+			return ShardResult{
+				ShardID: shardID,
+				Hits:    hits,
+				Total:   total,
+				Error:   err,
+			}
+		}
+	}
 
 	return ShardResult{
 		ShardID: shardID,
-		Hits:    hits,
-		Total:   total,
-		Error:   err,
+		Error:   ErrShardNotFound,
 	}
 }
 
