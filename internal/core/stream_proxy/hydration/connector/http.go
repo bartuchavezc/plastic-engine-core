@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"plastic-engine-core/internal/core/search/hydration"
+	"plastic-engine-core/internal/core/stream_proxy/hydration"
 )
 
 const (

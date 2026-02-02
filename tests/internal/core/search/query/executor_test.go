@@ -281,7 +281,7 @@ type testDoc struct {
 
 func indexDocuments(t *testing.T, store *pebble.PebbleStore, docs []testDoc) {
 	t.Helper()
-	writer := document.NewIndexWriter(store)
+	writer := document.NewIndexWriter(store, nil)
 	ctx := context.Background()
 
 	for _, doc := range docs {
@@ -302,7 +302,7 @@ func indexDocuments(t *testing.T, store *pebble.PebbleStore, docs []testDoc) {
 
 func indexDocumentsWithNgrams(t *testing.T, store *pebble.PebbleStore, docs []testDoc) {
 	t.Helper()
-	writer := document.NewIndexWriter(store)
+	writer := document.NewIndexWriter(store, nil)
 	ctx := context.Background()
 
 	ngramCfg := document.NgramConfig{
@@ -329,7 +329,7 @@ func indexDocumentsWithNgrams(t *testing.T, store *pebble.PebbleStore, docs []te
 
 func indexDocumentsCustom(t *testing.T, store *pebble.PebbleStore, reqs []document.DocumentWriteRequest) {
 	t.Helper()
-	writer := document.NewIndexWriter(store)
+	writer := document.NewIndexWriter(store, nil)
 	ctx := context.Background()
 
 	for _, req := range reqs {

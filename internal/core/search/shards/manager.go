@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"plastic-engine-core/internal/core/cluster/indexes"
 	"plastic-engine-core/internal/adapters/storage/pebble"
+	"plastic-engine-core/internal/core/cluster/indexes"
 )
 
 // Assignment describes how a shard should look when assigned to this node.
@@ -72,6 +72,15 @@ func (m *Manager) ensureLocalShard(assignment Assignment) error {
 
 		m.mu.Lock()
 		existing.Info = assignment
+		// Reopen store if it's closed (e.g., after restart)
+		if existing.Store == nil {
+			store, err := pebble.NewPebbleStore(m.shardPath(assignment.ID))
+			if err != nil {
+				m.mu.Unlock()
+				return fmt.Errorf("reopen pebble store for shard %s: %w", assignment.ID, err)
+			}
+			existing.Store = store
+		}
 		m.mu.Unlock()
 		return nil
 	}
@@ -158,6 +167,43 @@ func (m *Manager) GetShard(id string) (*Shard, bool) {
 
 	sh, ok := m.shards[id]
 	return sh, ok
+}
+
+// UnloadIndex closes and removes all shards belonging to the specified index.
+// It also deletes the shard directories from disk.
+func (m *Manager) UnloadIndex(indexID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var firstErr error
+	var unloadedCount int
+
+	// Find and remove all shards for this index
+	for id, shard := range m.shards {
+		if shard.Info.IndexID != indexID {
+			continue
+		}
+
+		// Close the Pebble store
+		if shard.Store != nil {
+			if err := shard.Store.Close(); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("close shard %s: %w", id, err)
+			}
+		}
+
+		// Remove from memory
+		delete(m.shards, id)
+
+		// Delete the shard directory
+		shardPath := m.shardPath(id)
+		if err := os.RemoveAll(shardPath); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("remove shard directory %s: %w", shardPath, err)
+		}
+
+		unloadedCount++
+	}
+
+	return firstErr
 }
 
 func writeManifest(shardPath string, assignment Assignment) error {

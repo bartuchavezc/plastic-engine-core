@@ -11,6 +11,32 @@ import (
 	"github.com/google/uuid"
 )
 
+// SupportedTokenizers lists all valid tokenizer names that can be used in field mappings.
+// These must match the tokenizers implemented in the search node's TokenizerFactory.
+var SupportedTokenizers = map[string]bool{
+	"":           true, // empty defaults to whitespace
+	"whitespace": true,
+	"standard":   true,
+}
+
+// SupportedAnalyzers lists all valid analyzer names that can be used in field mappings.
+// These must match the analyzers implemented in the search node's AnalyzerFactory.
+var SupportedAnalyzers = map[string]bool{
+	"":         true, // empty defaults to simple
+	"simple":   true,
+	"standard": true,
+}
+
+// IsValidTokenizer checks if a tokenizer name is supported.
+func IsValidTokenizer(name string) bool {
+	return SupportedTokenizers[strings.ToLower(strings.TrimSpace(name))]
+}
+
+// IsValidAnalyzer checks if an analyzer name is supported.
+func IsValidAnalyzer(name string) bool {
+	return SupportedAnalyzers[strings.ToLower(strings.TrimSpace(name))]
+}
+
 // Repository persists and retrieves index definitions.
 type Repository struct {
 	db *sql.DB
@@ -49,13 +75,15 @@ func (r *Repository) CreateIndex(ctx context.Context, req CreateIndexRequest) (C
 		return CreateIndexResponse{}, err
 	}
 
+	refreshTimeMs := req.RefreshTime.Milliseconds()
+
 	_, err = tx.ExecContext(
 		ctx,
 		`INSERT INTO indexes (
 			id, name, shard_strategy, shard_template, shard_config,
-			default_analyzer, default_tokenizer, mapping_version,
+			default_analyzer, default_tokenizer, mapping_version, refresh_time,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.ID,
 		req.Name,
 		string(req.ShardStrategy),
@@ -64,6 +92,7 @@ func (r *Repository) CreateIndex(ctx context.Context, req CreateIndexRequest) (C
 		req.DefaultAnalyzer,
 		req.DefaultTokenizer,
 		mappingVersion,
+		refreshTimeMs,
 		now,
 		now,
 	)
@@ -102,7 +131,7 @@ func (r *Repository) CreateIndex(ctx context.Context, req CreateIndexRequest) (C
 func (r *Repository) GetIndex(ctx context.Context, id string) (IndexDefinition, error) {
 	const query = `SELECT
 		id, name, shard_strategy, shard_template, shard_config,
-		default_analyzer, default_tokenizer, mapping_version,
+		default_analyzer, default_tokenizer, mapping_version, refresh_time,
 		created_at, updated_at
 	FROM indexes WHERE id = ?`
 
@@ -113,6 +142,7 @@ func (r *Repository) GetIndex(ctx context.Context, id string) (IndexDefinition, 
 
 	row := r.db.QueryRowContext(ctx, query, id)
 	var rawConfig sql.NullString
+	var refreshTimeMs int64
 	if scanErr := row.Scan(
 		&def.ID,
 		&def.Name,
@@ -122,6 +152,7 @@ func (r *Repository) GetIndex(ctx context.Context, id string) (IndexDefinition, 
 		&def.DefaultAnalyzer,
 		&def.DefaultTokenizer,
 		&def.MappingVersion,
+		&refreshTimeMs,
 		&def.CreatedAt,
 		&def.UpdatedAt,
 	); scanErr != nil {
@@ -130,6 +161,8 @@ func (r *Repository) GetIndex(ctx context.Context, id string) (IndexDefinition, 
 		}
 		return IndexDefinition{}, fmt.Errorf("scan index: %w", scanErr)
 	}
+
+	def.RefreshTime = time.Duration(refreshTimeMs) * time.Millisecond
 
 	fields, err := r.loadFieldMappings(ctx, id)
 	if err != nil {
@@ -148,7 +181,7 @@ func (r *Repository) GetIndex(ctx context.Context, id string) (IndexDefinition, 
 func (r *Repository) ListIndexes(ctx context.Context) ([]IndexDefinition, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT
 		id, name, shard_strategy, shard_template, shard_config,
-		default_analyzer, default_tokenizer, mapping_version,
+		default_analyzer, default_tokenizer, mapping_version, refresh_time,
 		created_at, updated_at
 		FROM indexes
 		ORDER BY created_at ASC`)
@@ -166,6 +199,7 @@ func (r *Repository) ListIndexes(ctx context.Context) ([]IndexDefinition, error)
 			def           IndexDefinition
 			shardStrategy string
 			shardConfig   sql.NullString
+			refreshTimeMs int64
 		)
 		if err := rows.Scan(
 			&def.ID,
@@ -176,6 +210,7 @@ func (r *Repository) ListIndexes(ctx context.Context) ([]IndexDefinition, error)
 			&def.DefaultAnalyzer,
 			&def.DefaultTokenizer,
 			&def.MappingVersion,
+			&refreshTimeMs,
 			&def.CreatedAt,
 			&def.UpdatedAt,
 		); err != nil {
@@ -183,6 +218,7 @@ func (r *Repository) ListIndexes(ctx context.Context) ([]IndexDefinition, error)
 		}
 
 		def.ShardStrategy = ShardStrategy(shardStrategy)
+		def.RefreshTime = time.Duration(refreshTimeMs) * time.Millisecond
 		rawConfigs[def.ID] = shardConfig.String
 		defs = append(defs, def)
 	}
@@ -473,6 +509,36 @@ func ValidateCreateRequest(req CreateIndexRequest) error {
 		}
 	default:
 		return NewValidationError(fmt.Sprintf("unsupported shard strategy %q", req.ShardConfig.Strategy))
+	}
+
+	// Validate default tokenizer and analyzer
+	if !IsValidTokenizer(req.DefaultTokenizer) {
+		return NewValidationError(fmt.Sprintf("unsupported default tokenizer %q", req.DefaultTokenizer))
+	}
+	if !IsValidAnalyzer(req.DefaultAnalyzer) {
+		return NewValidationError(fmt.Sprintf("unsupported default analyzer %q", req.DefaultAnalyzer))
+	}
+
+	// Validate tokenizers and analyzers in field mappings
+	for _, field := range req.FieldMappings {
+		if field.Type == FieldTypeText {
+			// Text fields use tokenizers and analyzers
+			tokenizer := field.Tokenizer
+			if tokenizer == "" {
+				tokenizer = req.DefaultTokenizer
+			}
+			if !IsValidTokenizer(tokenizer) {
+				return NewValidationError(fmt.Sprintf("unsupported tokenizer %q for field %q", tokenizer, field.Name))
+			}
+
+			analyzer := field.Analyzer
+			if analyzer == "" {
+				analyzer = req.DefaultAnalyzer
+			}
+			if !IsValidAnalyzer(analyzer) {
+				return NewValidationError(fmt.Sprintf("unsupported analyzer %q for field %q", analyzer, field.Name))
+			}
+		}
 	}
 
 	return nil

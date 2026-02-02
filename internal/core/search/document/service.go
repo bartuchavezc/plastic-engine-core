@@ -2,6 +2,7 @@ package document
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -18,7 +19,7 @@ type Command struct {
 	ShardID    string
 	DocumentID string
 	Routing    map[string]string
-	Payload    map[string]any
+	RawPayload json.RawMessage // Raw JSON bytes - validated and parsed at worker level
 	ReceivedAt time.Time
 }
 
@@ -70,12 +71,61 @@ func (s *Service) Index(ctx context.Context, cmd Command) error {
 		cmd.ReceivedAt = time.Now().UTC()
 	}
 
+	// Early validation: resolve assignment and build plans before enqueuing.
+	// This ensures configuration errors (e.g., unsupported tokenizer) are caught
+	// immediately and returned to the client, rather than failing silently in the worker.
+	if err := s.validateIndexConfig(ctx, cmd.ShardID); err != nil {
+		s.log.Error("index configuration validation failed",
+			logger.Field{Key: "shard_id", Value: cmd.ShardID},
+			logger.Field{Key: "document_id", Value: cmd.DocumentID},
+			logger.Field{Key: "error", Value: err},
+		)
+		return fmt.Errorf("index configuration error: %w", err)
+	}
+
 	worker, err := s.ensureWorker(cmd.ShardID)
 	if err != nil {
+		s.log.Error("failed to ensure worker",
+			logger.Field{Key: "shard_id", Value: cmd.ShardID},
+			logger.Field{Key: "document_id", Value: cmd.DocumentID},
+			logger.Field{Key: "error", Value: err},
+		)
 		return err
 	}
 
-	return worker.Submit(ctx, WorkItem{Command: cmd})
+	if err := worker.Submit(ctx, WorkItem{Command: cmd}); err != nil {
+		s.log.Error("failed to submit to worker queue",
+			logger.Field{Key: "shard_id", Value: cmd.ShardID},
+			logger.Field{Key: "document_id", Value: cmd.DocumentID},
+			logger.Field{Key: "error", Value: err},
+		)
+		return err
+	}
+
+	s.log.Debug("document submitted to worker queue",
+		logger.Field{Key: "shard_id", Value: cmd.ShardID},
+		logger.Field{Key: "document_id", Value: cmd.DocumentID},
+	)
+
+	return nil
+}
+
+// validateIndexConfig validates that the index configuration is valid for indexing.
+// This catches configuration errors early, before enqueuing the document.
+func (s *Service) validateIndexConfig(ctx context.Context, shardID string) error {
+	// Resolve assignment to get index definition
+	_, indexDef, err := s.assignments.AssignmentForShard(ctx, shardID)
+	if err != nil {
+		return fmt.Errorf("failed to resolve assignment: %w", err)
+	}
+
+	// Build field plans to validate tokenizers/analyzers
+	_, err = s.planner.BuildPlans(indexDef)
+	if err != nil {
+		return fmt.Errorf("failed to build field plans: %w", err)
+	}
+
+	return nil
 }
 
 func validateCommand(cmd Command) error {
@@ -88,8 +138,8 @@ func validateCommand(cmd Command) error {
 		return ErrInvalidCommand
 	}
 
-	if cmd.Payload == nil {
-		cmd.Payload = map[string]any{}
+	if cmd.RawPayload == nil {
+		cmd.RawPayload = []byte("{}")
 	}
 
 	return nil

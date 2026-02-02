@@ -9,7 +9,8 @@ import (
 	"strings"
 
 	indexes "plastic-engine-core/internal/core/cluster/indexes"
-	"plastic-engine-core/internal/adapters/storage/pebble"
+	pebble "plastic-engine-core/internal/adapters/storage/pebble"
+	"plastic-engine-core/internal/pkg/logger"
 )
 
 // ShardStore abstracts the persistence of indexing data inside a shard.
@@ -22,6 +23,9 @@ type ShardStore interface {
 	GetFloat64(key string) (float64, error)
 	SetFloat64(key string, value float64) error
 	Increment(key string, delta int64) (int64, error)
+	// MergeInt64 atomically adds delta to the int64 at key using Pebble's merge operator.
+	MergeInt64(key string, delta int64) error
+	NewBatch() pebble.BatchStore
 }
 
 // DocumentWriteRequest represents the terms generated for a document.
@@ -47,13 +51,18 @@ type Posting struct {
 type IndexWriter struct {
 	store        ShardStore
 	termRegistry *TermRegistry
+	log          logger.Logger
 }
 
 // NewIndexWriter builds an IndexWriter for the given shard store.
-func NewIndexWriter(store ShardStore) *IndexWriter {
+func NewIndexWriter(store ShardStore, log logger.Logger) *IndexWriter {
+	if log == nil {
+		log = logger.DefaultLogger()
+	}
 	return &IndexWriter{
 		store:        store,
 		termRegistry: NewTermRegistry(store),
+		log:          log,
 	}
 }
 
@@ -94,6 +103,131 @@ func (w *IndexWriter) Index(ctx context.Context, req DocumentWriteRequest) error
 			return fmt.Errorf("update avg doc len for %s: %w", fieldName, err)
 		}
 	}
+
+	return nil
+}
+
+// IndexBatch indexes multiple documents in a single atomic batch operation.
+func (w *IndexWriter) IndexBatch(ctx context.Context, requests []DocumentWriteRequest) error {
+	if len(requests) == 0 {
+		w.log.Debug("IndexBatch: no requests, skipping")
+		return nil
+	}
+
+	w.log.Debug("IndexBatch: starting",
+		logger.Field{Key: "requests_count", Value: len(requests)},
+	)
+
+	// Prepare all operations for the batch
+	batch := w.store.NewBatch()
+
+	defer func() {
+		if batch != nil {
+			batch.Close()
+		}
+	}()
+
+	for i, req := range requests {
+		w.log.Debug("IndexBatch: preparing document",
+			logger.Field{Key: "document_id", Value: req.DocumentID},
+			logger.Field{Key: "index", Value: i},
+			logger.Field{Key: "fields_count", Value: len(req.Fields)},
+		)
+		if err := w.prepareBatchOperations(batch, req); err != nil {
+			w.log.Error("IndexBatch: failed to prepare batch operations",
+				logger.Field{Key: "document_id", Value: req.DocumentID},
+				logger.Field{Key: "error", Value: err},
+			)
+			return fmt.Errorf("preparing batch operations for doc %s: %w", req.DocumentID, err)
+		}
+	}
+
+	w.log.Debug("IndexBatch: committing batch")
+
+	// Commit the batch
+	if err := batch.Commit(); err != nil {
+		w.log.Error("IndexBatch: failed to commit batch",
+			logger.Field{Key: "error", Value: err},
+		)
+		return fmt.Errorf("committing batch: %w", err)
+	}
+
+	batch = nil // Prevent double close
+
+	w.log.Info("IndexBatch: committed successfully",
+		logger.Field{Key: "documents_count", Value: len(requests)},
+	)
+
+	return nil
+}
+
+func (w *IndexWriter) prepareBatchOperations(batch pebble.BatchStore, req DocumentWriteRequest) error {
+	w.log.Debug("prepareBatchOperations: building forward state",
+		logger.Field{Key: "document_id", Value: req.DocumentID},
+		logger.Field{Key: "fields_count", Value: len(req.Fields)},
+	)
+
+	newState := buildForwardState(req)
+
+	w.log.Debug("prepareBatchOperations: forward state built",
+		logger.Field{Key: "document_id", Value: req.DocumentID},
+		logger.Field{Key: "state_fields", Value: len(newState.Fields)},
+	)
+
+	prevState, err := w.loadForward(req.DocumentID)
+	if err != nil {
+		w.log.Error("prepareBatchOperations: failed to load previous forward",
+			logger.Field{Key: "document_id", Value: req.DocumentID},
+			logger.Field{Key: "error", Value: err},
+		)
+		return err
+	}
+
+	isNewDoc := len(prevState.Fields) == 0
+
+	w.log.Debug("prepareBatchOperations: applying diff",
+		logger.Field{Key: "document_id", Value: req.DocumentID},
+		logger.Field{Key: "is_new_doc", Value: isNewDoc},
+		logger.Field{Key: "prev_fields", Value: len(prevState.Fields)},
+		logger.Field{Key: "new_fields", Value: len(newState.Fields)},
+	)
+
+	// Apply diff operations to batch
+	if err := w.applyDiffToBatch(batch, prevState, newState, req.DocumentID, req.NgramConfig); err != nil {
+		w.log.Error("prepareBatchOperations: failed to apply diff",
+			logger.Field{Key: "document_id", Value: req.DocumentID},
+			logger.Field{Key: "error", Value: err},
+		)
+		return err
+	}
+
+	// Save forward index to batch
+	if err := w.saveForwardToBatch(batch, req.DocumentID, newState); err != nil {
+		w.log.Error("prepareBatchOperations: failed to save forward",
+			logger.Field{Key: "document_id", Value: req.DocumentID},
+			logger.Field{Key: "error", Value: err},
+		)
+		return err
+	}
+
+	// Update metadata
+	if isNewDoc {
+		if err := batch.Increment(pebble.DocCountKey(), 1); err != nil {
+			return fmt.Errorf("increment doc count: %w", err)
+		}
+	}
+
+	// Update average document length per field
+	for fieldName, fieldData := range newState.Fields {
+		termCount := int64(len(fieldData.Tokens))
+		if err := w.updateAvgDocLenToBatch(batch, fieldName, termCount, isNewDoc); err != nil {
+			return fmt.Errorf("update avg doc len for %s: %w", fieldName, err)
+		}
+	}
+
+	w.log.Debug("prepareBatchOperations: completed",
+		logger.Field{Key: "document_id", Value: req.DocumentID},
+	)
 
 	return nil
 }
@@ -187,6 +321,148 @@ func (w *IndexWriter) applyDiff(ctx context.Context, prev, next forwardDocument,
 					return err
 				}
 			}
+		}
+	}
+
+	return nil
+}
+
+func (w *IndexWriter) applyDiffToBatch(batch pebble.BatchStore, prev, next forwardDocument, documentID string, ngramConfig NgramConfig) error {
+	prevTerms := prev.asTermMap()
+	nextTerms := next.asTermMap()
+
+	// Remove terms that no longer exist
+	for field, terms := range prevTerms {
+		for term := range terms {
+			if _, ok := nextTerms[field][term]; !ok {
+				if err := w.removeTermFromBatch(batch, field, term, documentID, ngramConfig); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	// Add new terms
+	for field, terms := range nextTerms {
+		for term, posting := range terms {
+			if _, existed := prevTerms[field][term]; !existed {
+				if err := w.addTermToBatch(batch, field, term, documentID, posting, ngramConfig); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (w *IndexWriter) addTermToBatch(batch pebble.BatchStore, field, term, documentID string, posting Posting, ngramConfig NgramConfig) error {
+	// Get or create term in registry
+	entry, err := w.termRegistry.GetOrCreate(context.Background(), field, term)
+	if err != nil {
+		return fmt.Errorf("get term entry: %w", err)
+	}
+
+	// Write posting
+	postingData, err := json.Marshal(posting)
+	if err != nil {
+		return fmt.Errorf("encode posting: %w", err)
+	}
+
+	invKey := pebble.InvertedKey(entry.TermID, documentID)
+	if err := batch.Set(invKey, string(postingData)); err != nil {
+		return fmt.Errorf("set inverted entry: %w", err)
+	}
+
+	// Increment document frequency
+	if err := w.termRegistry.IncrementDF(context.Background(), field, term); err != nil {
+		return fmt.Errorf("increment df: %w", err)
+	}
+
+	// Write edge n-grams
+	ngrams := GenerateEdgeNgrams(term, ngramConfig)
+	for _, ngram := range ngrams {
+		ngramKey := pebble.NgramKey(field, ngram, entry.TermID)
+		// Empty value - key-only existence check
+		if err := batch.Set(ngramKey, ""); err != nil {
+			return fmt.Errorf("set ngram entry: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (w *IndexWriter) removeTermFromBatch(batch pebble.BatchStore, field, term, documentID string, ngramConfig NgramConfig) error {
+	// Get term from registry
+	entry, found, err := w.termRegistry.Get(context.Background(), field, term)
+	if err != nil {
+		return fmt.Errorf("get term entry: %w", err)
+	}
+	if !found {
+		return nil // Term doesn't exist, nothing to remove
+	}
+
+	// Delete posting
+	invKey := pebble.InvertedKey(entry.TermID, documentID)
+	if err := batch.Delete(invKey); err != nil {
+		return fmt.Errorf("delete inverted entry: %w", err)
+	}
+
+	// Decrement document frequency
+	if err := w.termRegistry.DecrementDF(context.Background(), field, term); err != nil {
+		return fmt.Errorf("decrement df: %w", err)
+	}
+
+	// Note: We don't delete n-gram entries here because they may still be used by other documents.
+	// N-gram cleanup could be done as a background maintenance task if needed.
+
+	return nil
+}
+
+func (w *IndexWriter) saveForwardToBatch(batch pebble.BatchStore, documentID string, doc forwardDocument) error {
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("encode forward index: %w", err)
+	}
+
+	if err := batch.Set(pebble.ForwardKey(documentID), string(payload)); err != nil {
+		return fmt.Errorf("persist forward index: %w", err)
+	}
+
+	return nil
+}
+
+func (w *IndexWriter) updateAvgDocLenToBatch(batch pebble.BatchStore, field string, termCount int64, isNewDoc bool) error {
+	// Get current totals (this requires reading from store, not batch)
+	totalTerms, err := w.store.GetInt64(pebble.TotalTermLenKey(field))
+	if err != nil && !pebble.IsNotFound(err) {
+		return err
+	}
+
+	fieldDocs, err := w.store.GetInt64(pebble.FieldDocsKey(field))
+	if err != nil && !pebble.IsNotFound(err) {
+		return err
+	}
+
+	// Update totals
+	totalTerms += termCount
+	if isNewDoc {
+		fieldDocs++
+	}
+
+	// Persist to batch
+	if err := batch.SetInt64(pebble.TotalTermLenKey(field), totalTerms); err != nil {
+		return err
+	}
+	if err := batch.SetInt64(pebble.FieldDocsKey(field), fieldDocs); err != nil {
+		return err
+	}
+
+	// Calculate and store average
+	if fieldDocs > 0 {
+		avgLen := float64(totalTerms) / float64(fieldDocs)
+		if err := batch.SetFloat64(pebble.AvgDocLenKey(field), avgLen); err != nil {
+			return err
 		}
 	}
 

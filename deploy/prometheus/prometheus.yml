@@ -1,0 +1,38 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers: []
+
+rule_files: []
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Coordinator metrics (internal port 9091)
+  - job_name: 'coordinator'
+    static_configs:
+      - targets: ['coordinator:9091']
+        labels:
+          service: 'coordinator'
+          instance: 'coordinator'
+
+  # Search node 1 metrics (internal port 9091)
+  - job_name: 'search-1'
+    static_configs:
+      - targets: ['search-1:9091']
+        labels:
+          service: 'search'
+          instance: 'search-1'
+
+  # Search node 2 metrics (internal port 9092)
+  - job_name: 'search-2'
+    static_configs:
+      - targets: ['search-2:9092']
+        labels:
+          service: 'search'
+          instance: 'search-2'

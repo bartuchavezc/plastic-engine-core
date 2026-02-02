@@ -3,6 +3,7 @@ package pebble
 import (
 	"encoding/binary"
 	"errors"
+	"io"
 	"math"
 
 	pebbledb "github.com/cockroachdb/pebble"
@@ -17,20 +18,132 @@ type KeyValue struct {
 	Value string
 }
 
-// PebbleStore wraps a Pebble database with convenient methods.
-type PebbleStore struct {
-	db   *pebbledb.DB
-	path string
+// BatchStore provides batch operations for atomic writes.
+type BatchStore interface {
+	Set(key string, value string) error
+	Delete(key string) error
+	SetInt64(key string, value int64) error
+	SetFloat64(key string, value float64) error
+	Increment(key string, delta int64) error
+	// MergeInt64 atomically adds delta to the int64 at key using Pebble's merge operator.
+	MergeInt64(key string, delta int64) error
+	Commit() error
+	Close() error
 }
 
-// NewPebbleStore opens or creates a Pebble database at the given path.
+// StoreConfig configures PebbleStore behavior.
+type StoreConfig struct {
+	// SyncWrites forces fsync on every write. Default false (NoSync) for better performance.
+	// Only set to true if you need durability guarantees against power loss.
+	SyncWrites bool
+
+	// MaxConcurrentCompactions limits concurrent compaction goroutines.
+	// Default 0 uses Pebble's default (runtime.NumCPU()).
+	// For multiple shards, lower values reduce total goroutines.
+	MaxConcurrentCompactions int
+
+	// MemTableSize is the size of each memtable in bytes.
+	// Default 0 uses Pebble's default (4MB).
+	MemTableSize int
+
+	// DisableDiskHealthCheck disables Pebble's disk health monitoring goroutines.
+	// Default false. Set true to reduce goroutine count (one less per open file).
+	DisableDiskHealthCheck bool
+}
+
+// DefaultStoreConfig returns the default configuration optimized for indexing performance.
+func DefaultStoreConfig() StoreConfig {
+	return StoreConfig{
+		SyncWrites:               false, // NoSync by default - WAL still provides crash recovery
+		MaxConcurrentCompactions: 1,     // Limit compaction parallelism per shard
+		MemTableSize:             0,     // Use Pebble default
+		DisableDiskHealthCheck:   false, // Keep health checks enabled by default
+	}
+}
+
+// PebbleStore wraps a Pebble database with convenient methods.
+type PebbleStore struct {
+	db        *pebbledb.DB
+	path      string
+	writeOpts *pebbledb.WriteOptions
+}
+
+// Int64AddMerger implements a merge operator that sums int64 values.
+// This enables atomic increment operations without read-modify-write races.
+var Int64AddMerger = &pebbledb.Merger{
+	Name: "Int64AddMerger",
+	Merge: func(key, value []byte) (pebbledb.ValueMerger, error) {
+		return &int64ValueMerger{sum: bytesToInt64(value)}, nil
+	},
+}
+
+type int64ValueMerger struct {
+	sum int64
+}
+
+func (m *int64ValueMerger) MergeNewer(value []byte) error {
+	m.sum += bytesToInt64(value)
+	return nil
+}
+
+func (m *int64ValueMerger) MergeOlder(value []byte) error {
+	m.sum += bytesToInt64(value)
+	return nil
+}
+
+func (m *int64ValueMerger) Finish(includesBase bool) ([]byte, io.Closer, error) {
+	return int64ToBytes(m.sum), nil, nil
+}
+
+func bytesToInt64(b []byte) int64 {
+	if len(b) != 8 {
+		return 0
+	}
+	return int64(binary.BigEndian.Uint64(b))
+}
+
+func int64ToBytes(v int64) []byte {
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, uint64(v))
+	return buf
+}
+
+// NewPebbleStore opens or creates a Pebble database at the given path with default config.
 func NewPebbleStore(path string) (*PebbleStore, error) {
-	db, err := pebbledb.Open(path, nil)
+	return NewPebbleStoreWithConfig(path, DefaultStoreConfig())
+}
+
+// NewPebbleStoreWithConfig opens or creates a Pebble database with custom configuration.
+func NewPebbleStoreWithConfig(path string, cfg StoreConfig) (*PebbleStore, error) {
+	opts := &pebbledb.Options{
+		Merger: Int64AddMerger,
+	}
+
+	// Limit compaction parallelism to reduce goroutine count when running multiple shards
+	if cfg.MaxConcurrentCompactions > 0 {
+		opts.MaxConcurrentCompactions = func() int { return cfg.MaxConcurrentCompactions }
+	}
+
+	// Configure memtable size if specified
+	if cfg.MemTableSize > 0 {
+		opts.MemTableSize = uint64(cfg.MemTableSize)
+	}
+
+	db, err := pebbledb.Open(path, opts)
 	if err != nil {
 		return nil, err
 	}
 
-	return &PebbleStore{db: db, path: path}, nil
+	writeOpts := pebbledb.NoSync
+	if cfg.SyncWrites {
+		writeOpts = pebbledb.Sync
+	}
+
+	return &PebbleStore{
+		db:        db,
+		path:      path,
+		writeOpts: writeOpts,
+	}, nil
 }
 
 // Get retrieves a string value by key.
@@ -63,17 +176,23 @@ func (s *PebbleStore) GetBytes(key string) ([]byte, error) {
 
 // Set stores a string value at key.
 func (s *PebbleStore) Set(key string, value string) error {
-	return s.db.Set([]byte(key), []byte(value), pebbledb.Sync)
+	return s.db.Set([]byte(key), []byte(value), s.writeOpts)
 }
 
 // SetBytes stores raw bytes at key.
 func (s *PebbleStore) SetBytes(key string, value []byte) error {
-	return s.db.Set([]byte(key), value, pebbledb.Sync)
+	return s.db.Set([]byte(key), value, s.writeOpts)
 }
 
 // Delete removes a key from the store.
 func (s *PebbleStore) Delete(key string) error {
-	return s.db.Delete([]byte(key), pebbledb.Sync)
+	return s.db.Delete([]byte(key), s.writeOpts)
+}
+
+// MergeInt64 atomically adds delta to the int64 at key using Pebble's merge operator.
+// This is safe for concurrent use - no read-modify-write race conditions.
+func (s *PebbleStore) MergeInt64(key string, delta int64) error {
+	return s.db.Merge([]byte(key), int64ToBytes(delta), s.writeOpts)
 }
 
 // Close closes the database.
@@ -129,17 +248,14 @@ func (s *PebbleStore) SetFloat64(key string, value float64) error {
 	return s.SetBytes(key, buf)
 }
 
-// Increment atomically adds delta to the int64 at key (creates with delta if missing).
+// Increment atomically adds delta to the int64 at key using the merge operator.
+// This is safe for concurrent use - no read-modify-write race conditions.
+// Note: The returned value is the delta applied, not the new total (use GetInt64 if needed).
 func (s *PebbleStore) Increment(key string, delta int64) (int64, error) {
-	current, err := s.GetInt64(key)
-	if err != nil && !IsNotFound(err) {
+	if err := s.MergeInt64(key, delta); err != nil {
 		return 0, err
 	}
-	newVal := current + delta
-	if err := s.SetInt64(key, newVal); err != nil {
-		return 0, err
-	}
-	return newVal, nil
+	return delta, nil
 }
 
 // --------------------------------------------------------------------------
@@ -240,50 +356,69 @@ func prefixUpperBound(prefix []byte) []byte {
 
 // Batch groups multiple writes for atomic commit.
 type Batch struct {
-	batch *pebbledb.Batch
-	store *PebbleStore
+	batch     *pebbledb.Batch
+	store     *PebbleStore
+	writeOpts *pebbledb.WriteOptions
 }
 
 // NewBatch creates a new write batch.
-func (s *PebbleStore) NewBatch() *Batch {
+func (s *PebbleStore) NewBatch() BatchStore {
 	return &Batch{
-		batch: s.db.NewBatch(),
-		store: s,
+		batch:     s.db.NewBatch(),
+		store:     s,
+		writeOpts: s.writeOpts,
 	}
 }
 
 // Set adds a string key-value to the batch.
-func (b *Batch) Set(key, value string) {
+func (b *Batch) Set(key, value string) error {
 	b.batch.Set([]byte(key), []byte(value), nil)
+	return nil
 }
 
 // SetBytes adds a raw key-value to the batch.
-func (b *Batch) SetBytes(key string, value []byte) {
+func (b *Batch) SetBytes(key string, value []byte) error {
 	b.batch.Set([]byte(key), value, nil)
+	return nil
 }
 
 // SetInt64 adds an int64 to the batch.
-func (b *Batch) SetInt64(key string, value int64) {
+func (b *Batch) SetInt64(key string, value int64) error {
 	buf := make([]byte, 8)
 	binary.BigEndian.PutUint64(buf, uint64(value))
 	b.batch.Set([]byte(key), buf, nil)
+	return nil
 }
 
 // SetFloat64 adds a float64 to the batch.
-func (b *Batch) SetFloat64(key string, value float64) {
+func (b *Batch) SetFloat64(key string, value float64) error {
 	buf := make([]byte, 8)
 	binary.BigEndian.PutUint64(buf, math.Float64bits(value))
 	b.batch.Set([]byte(key), buf, nil)
+	return nil
 }
 
 // Delete adds a delete operation to the batch.
-func (b *Batch) Delete(key string) {
+func (b *Batch) Delete(key string) error {
 	b.batch.Delete([]byte(key), nil)
+	return nil
+}
+
+// Increment adds an atomic increment operation to the batch using the merge operator.
+// This is safe for concurrent use - no read-modify-write race conditions.
+func (b *Batch) Increment(key string, delta int64) error {
+	return b.MergeInt64(key, delta)
+}
+
+// MergeInt64 adds an atomic merge operation to the batch.
+// When committed, this will atomically add delta to the existing value at key.
+func (b *Batch) MergeInt64(key string, delta int64) error {
+	return b.batch.Merge([]byte(key), int64ToBytes(delta), nil)
 }
 
 // Commit applies all operations atomically.
 func (b *Batch) Commit() error {
-	return b.batch.Commit(pebbledb.Sync)
+	return b.batch.Commit(b.writeOpts)
 }
 
 // Close discards the batch without committing.

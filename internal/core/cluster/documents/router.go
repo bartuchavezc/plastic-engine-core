@@ -15,7 +15,6 @@ import (
 
 	"plastic-engine-core/internal/core/cluster/indexes"
 	"plastic-engine-core/internal/core/cluster/indexes/sharding"
-	"plastic-engine-core/internal/core/cluster/mappings"
 	"plastic-engine-core/internal/core/cluster/shards"
 	"plastic-engine-core/internal/pkg/logger"
 )
@@ -25,36 +24,54 @@ type IndexRepository interface {
 	GetIndex(ctx context.Context, id string) (indexes.IndexDefinition, error)
 }
 
-// MappingsService handles dynamic mapping and field validation.
-type MappingsService interface {
-	ProcessDocument(ctx context.Context, indexID string, doc map[string]any) ([]mappings.Field, error)
-	AddFields(ctx context.Context, indexID string, fields []mappings.Field) error
+// Router encapsulates the dependencies required to execute the ingestion workflow.
+// Note: Mapping validation has been moved to the search node for better performance.
+// The coordinator only extracts routing information and forwards raw bytes.
+type Router struct {
+	IndexRepo  IndexRepository
+	ShardRepo  *shards.Repository
+	HTTPClient *http.Client
+	Batcher    *DocumentBatcher
+	Logger     logger.Logger
 }
 
-// Router encapsulates the dependencies required to execute the ingestion workflow.
-type Router struct {
-	IndexRepo   IndexRepository
-	ShardRepo   *shards.Repository
-	MappingsSvc MappingsService
-	HTTPClient  *http.Client
-	Logger      logger.Logger
+// RouterConfig holds configuration for creating a Router.
+type RouterConfig struct {
+	DB         *sql.DB
+	IndexRepo  IndexRepository
+	HTTPClient *http.Client
+	Batcher    *DocumentBatcher
+	Logger     logger.Logger
 }
 
 // NewRouter creates a document router.
-func NewRouter(db *sql.DB, indexRepo IndexRepository, mappingsSvc MappingsService, httpClient *http.Client, log logger.Logger) *Router {
+func NewRouter(db *sql.DB, indexRepo IndexRepository, httpClient *http.Client, log logger.Logger) *Router {
+	return NewRouterWithConfig(RouterConfig{
+		DB:         db,
+		IndexRepo:  indexRepo,
+		HTTPClient: httpClient,
+		Logger:     log,
+	})
+}
+
+// NewRouterWithConfig creates a document router with full configuration.
+func NewRouterWithConfig(cfg RouterConfig) *Router {
+	log := cfg.Logger
 	if log == nil {
 		log = logger.DefaultLogger()
 	}
 	return &Router{
-		IndexRepo:   indexRepo,
-		ShardRepo:   shards.NewRepository(db),
-		MappingsSvc: mappingsSvc,
-		HTTPClient:  httpClient,
-		Logger:      log,
+		IndexRepo:  cfg.IndexRepo,
+		ShardRepo:  shards.NewRepository(cfg.DB),
+		HTTPClient: cfg.HTTPClient,
+		Batcher:    cfg.Batcher,
+		Logger:     log,
 	}
 }
 
 // Handle executes the ingestion pipeline by routing the document to the appropriate shard.
+// Note: Mapping validation is performed at the search node, not here.
+// The coordinator only extracts routing information and forwards raw bytes.
 func (r *Router) Handle(ctx context.Context, req Request) error {
 	ctx, span := otel.Tracer("cluster.documents").Start(ctx, "Router.Handle")
 	defer span.End()
@@ -78,40 +95,8 @@ func (r *Router) Handle(ctx context.Context, req Request) error {
 		return err
 	}
 
-	// Process document for dynamic mapping (infer new fields, validate types)
-	if r.MappingsSvc != nil && len(req.Payload) > 0 {
-		var doc map[string]any
-		if err := json.Unmarshal(req.Payload, &doc); err == nil && doc != nil {
-			newFields, err := r.MappingsSvc.ProcessDocument(ctx, req.IndexID, doc)
-			if err != nil {
-				return fmt.Errorf("mapping validation failed: %w", err)
-			}
-
-			// Persist new fields if dynamic mapping added them
-			if len(newFields) > 0 {
-				if err := r.MappingsSvc.AddFields(ctx, req.IndexID, newFields); err != nil {
-					return fmt.Errorf("persist inferred fields: %w", err)
-				}
-				r.Logger.Info("dynamic mapping: added fields",
-					logger.Field{Key: "index_id", Value: req.IndexID},
-					logger.Field{Key: "count", Value: len(newFields)},
-				)
-
-				// Refresh index definition to include new fields
-				def, err = r.IndexRepo.GetIndex(ctx, req.IndexID)
-				if err != nil {
-					return err
-				}
-			}
-		}
-	}
-
-	normalizedPayload, err := NormalizePayload(def, req.Payload)
-	if err != nil {
-		return err
-	}
-
-	shardKey, err := sharding.ComputeShardKey(def, req.DocumentID, normalizedPayload, sharding.RoutingMetadata(req.Routing))
+	// Compute shard key using raw payload (gjson extraction, no full parse)
+	shardKey, err := sharding.ComputeShardKey(def, req.DocumentID, req.Payload, sharding.RoutingMetadata(req.Routing))
 	if err != nil {
 		return err
 	}
@@ -133,13 +118,41 @@ func (r *Router) Handle(ctx context.Context, req Request) error {
 		return fmt.Errorf("node %s missing advertise address", nodeInfo.ID)
 	}
 
+	// Use batcher if available for improved throughput
+	if r.Batcher != nil {
+		doc := BatchDocument{
+			IndexID:    req.IndexID,
+			ShardID:    shardInfo.ID,
+			DocumentID: req.DocumentID,
+			Routing:    req.Routing,
+			Payload:    req.Payload, // Forward raw bytes, validation happens at search node
+		}
+
+		if err := r.Batcher.Add(ctx, nodeInfo.ID, nodeInfo.AdvertiseAddr, doc); err != nil {
+			return fmt.Errorf("batch document for node %s: %w", nodeInfo.ID, err)
+		}
+
+		r.Logger.Debug("document batched",
+			logger.Field{Key: "index_id", Value: req.IndexID},
+			logger.Field{Key: "shard_id", Value: shardInfo.ID},
+			logger.Field{Key: "node_id", Value: nodeInfo.ID},
+		)
+
+		return nil
+	}
+
+	// Direct HTTP request (fallback when batcher is not configured)
+	return r.sendDirectRequest(ctx, nodeInfo, req, shardInfo.ID)
+}
+
+func (r *Router) sendDirectRequest(ctx context.Context, nodeInfo shards.NodeInfo, req Request, shardID string) error {
+	// Build forward payload with raw bytes (no re-serialization of payload content)
 	forwardPayload := map[string]any{
-		"index_id":        req.IndexID,
-		"shard_id":        shardInfo.ID,
-		"document_id":     req.DocumentID,
-		"routing":         req.Routing,
-		"payload":         normalizedPayload,
-		"mapping_version": def.MappingVersion,
+		"index_id":    req.IndexID,
+		"shard_id":    shardID,
+		"document_id": req.DocumentID,
+		"routing":     req.Routing,
+		"payload":     req.Payload, // json.RawMessage is included directly
 	}
 
 	body, err := json.Marshal(forwardPayload)
@@ -164,9 +177,9 @@ func (r *Router) Handle(ctx context.Context, req Request) error {
 		return fmt.Errorf("node %s returned %d: %s", nodeInfo.ID, resp.StatusCode, string(slurp))
 	}
 
-	r.Logger.Info("document forwarded",
+	r.Logger.Debug("document forwarded",
 		logger.Field{Key: "index_id", Value: req.IndexID},
-		logger.Field{Key: "shard_id", Value: shardInfo.ID},
+		logger.Field{Key: "shard_id", Value: shardID},
 		logger.Field{Key: "node_id", Value: nodeInfo.ID},
 	)
 

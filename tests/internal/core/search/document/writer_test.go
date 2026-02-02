@@ -16,7 +16,7 @@ func TestIndexWriterPersistsForwardAndInverted(t *testing.T) {
 	t.Parallel()
 
 	store := newTestPebbleStore(t)
-	writer := document.NewIndexWriter(store)
+	writer := document.NewIndexWriter(store, nil)
 
 	req := document.DocumentWriteRequest{
 		DocumentID:  "doc-1",
@@ -73,7 +73,7 @@ func TestIndexWriterAppliesDiffOnReindex(t *testing.T) {
 	t.Parallel()
 
 	store := newTestPebbleStore(t)
-	writer := document.NewIndexWriter(store)
+	writer := document.NewIndexWriter(store, nil)
 	ctx := context.Background()
 
 	initial := document.DocumentWriteRequest{
@@ -145,7 +145,7 @@ func TestIndexWriterEdgeNgrams(t *testing.T) {
 	t.Parallel()
 
 	store := newTestPebbleStore(t)
-	writer := document.NewIndexWriter(store)
+	writer := document.NewIndexWriter(store, nil)
 
 	req := document.DocumentWriteRequest{
 		DocumentID: "doc-1",
@@ -185,7 +185,7 @@ func TestIndexWriterMetadataUpdate(t *testing.T) {
 	t.Parallel()
 
 	store := newTestPebbleStore(t)
-	writer := document.NewIndexWriter(store)
+	writer := document.NewIndexWriter(store, nil)
 	ctx := context.Background()
 
 	// Index first document

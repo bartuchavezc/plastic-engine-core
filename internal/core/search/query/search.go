@@ -3,7 +3,9 @@ package query
 import (
 	"context"
 	"sync"
+	"time"
 
+	"plastic-engine-core/internal/adapters/telemetry/metrics"
 	"plastic-engine-core/internal/pkg/logger"
 )
 
@@ -22,49 +24,71 @@ type Response struct {
 	Cursor string `json:"cursor,omitempty"`
 }
 
-// ShardProvider provides access to shards for query execution.
-type ShardProvider interface {
-	// GetShardsByIndex returns all shard IDs for the given index.
-	GetShardsByIndex(indexID string) []string
-	// GetShardStore returns the store for a specific shard.
-	GetShardStore(shardID string) (ShardStore, bool)
-}
+// ShardStoreGetter provides access to shard stores by ID.
+type ShardStoreGetter func(shardID string) (ShardStore, bool)
 
 // SearchService coordinates search across multiple shards.
+// It assumes shard routing has been resolved externally.
 type SearchService struct {
-	shardProvider ShardProvider
+	getShardStore ShardStoreGetter
 	log           logger.Logger
 }
 
 // NewSearchService creates a new search service.
-func NewSearchService(provider ShardProvider, log logger.Logger) *SearchService {
+func NewSearchService(getter ShardStoreGetter, log logger.Logger) *SearchService {
 	if log == nil {
 		log = logger.DefaultLogger()
 	}
 	return &SearchService{
-		shardProvider: provider,
+		getShardStore: getter,
 		log:           log,
 	}
 }
 
 // Search executes the query across all relevant shards and returns aggregated results.
+// It assumes shard routing has been resolved and shard_ids are provided in the request.
 func (s *SearchService) Search(ctx context.Context, req Request) (Response, error) {
-	// Get shards for this index
-	shardIDs := s.shardProvider.GetShardsByIndex(req.IndexID)
+	shardIDs := req.ShardIDs
 	if len(shardIDs) == 0 {
 		return Response{Hits: []Hit{}, Total: 0}, nil
 	}
+
+	start := time.Now()
 
 	// Execute on all shards in parallel
 	results := s.executeParallel(ctx, shardIDs, req)
 
 	// Merge results
-	return s.mergeResults(results, req.Limit), nil
+	response := s.mergeResults(results, req.Limit)
+
+	// Record metrics
+	if mp := metrics.Global(); mp != nil {
+		queryType := detectQueryType(req.Query)
+		mp.RecordSearchQueryMetrics(ctx, queryType, len(shardIDs), response.Total, time.Since(start))
+	}
+
+	return response, nil
+}
+
+// detectQueryType returns the type of query for metrics labeling.
+func detectQueryType(clause Clause) string {
+	switch {
+	case clause.Term != nil:
+		return "term"
+	case clause.Match != nil:
+		return "match"
+	case clause.Prefix != nil:
+		return "prefix"
+	case clause.Range != nil:
+		return "range"
+	default:
+		return "unknown"
+	}
 }
 
 // SearchStream returns a channel of shard results for streaming.
 func (s *SearchService) SearchStream(ctx context.Context, req Request) <-chan ShardResult {
-	shardIDs := s.shardProvider.GetShardsByIndex(req.IndexID)
+	shardIDs := req.ShardIDs
 	resultCh := make(chan ShardResult, len(shardIDs))
 
 	go func() {
@@ -105,7 +129,7 @@ func (s *SearchService) executeParallel(ctx context.Context, shardIDs []string, 
 }
 
 func (s *SearchService) executeOnShard(ctx context.Context, shardID string, req Request) ShardResult {
-	store, ok := s.shardProvider.GetShardStore(shardID)
+	store, ok := s.getShardStore(shardID)
 	if !ok {
 		return ShardResult{
 			ShardID: shardID,

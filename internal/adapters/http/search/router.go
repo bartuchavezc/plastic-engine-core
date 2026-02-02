@@ -7,6 +7,8 @@ import (
 	"net/http"
 
 	"plastic-engine-core/internal/core/search/document"
+	searchquery "plastic-engine-core/internal/core/search/query"
+	"plastic-engine-core/internal/core/search/shards"
 	"plastic-engine-core/internal/pkg/logger"
 )
 
@@ -15,8 +17,38 @@ type Indexer interface {
 	Index(ctx context.Context, cmd document.Command) error
 }
 
+// Searcher defines the contract required to execute search queries.
+type Searcher interface {
+	Search(ctx context.Context, req searchquery.Request) (searchquery.Response, error)
+}
+
+// ShardSyncer handles shard synchronization operations.
+type ShardSyncer interface {
+	Sync(assignments []shards.Assignment) error
+	UnloadIndex(indexID string) error
+}
+
+// RouterConfig holds configuration for creating a Router.
+type RouterConfig struct {
+	Indexer     Indexer
+	Searcher    Searcher
+	ShardSyncer ShardSyncer
+	Logger      logger.Logger
+}
+
 // NewRouter exposes the HTTP surface of a search node.
-func NewRouter(idx Indexer, log logger.Logger) http.Handler {
+func NewRouter(idx Indexer, searcher Searcher, syncer ShardSyncer, log logger.Logger) http.Handler {
+	return NewRouterWithConfig(RouterConfig{
+		Indexer:     idx,
+		Searcher:    searcher,
+		ShardSyncer: syncer,
+		Logger:      log,
+	})
+}
+
+// NewRouterWithConfig creates a router with full configuration.
+func NewRouterWithConfig(cfg RouterConfig) http.Handler {
+	log := cfg.Logger
 	if log == nil {
 		log = logger.DefaultLogger()
 	}
@@ -29,7 +61,23 @@ func NewRouter(idx Indexer, log logger.Logger) http.Handler {
 	})
 
 	mux.HandleFunc("/documents", func(w http.ResponseWriter, r *http.Request) {
-		handleDocumentIngest(w, r, idx, log)
+		handleDocumentIngest(w, r, cfg.Indexer, log)
+	})
+
+	mux.HandleFunc("/documents/bulk", func(w http.ResponseWriter, r *http.Request) {
+		handleBulkDocumentIngest(w, r, cfg.Indexer, log)
+	})
+
+	mux.HandleFunc("/search", func(w http.ResponseWriter, r *http.Request) {
+		handleSearch(w, r, cfg.Searcher, log)
+	})
+
+	mux.HandleFunc("/shards/sync", func(w http.ResponseWriter, r *http.Request) {
+		handleShardSync(w, r, cfg.ShardSyncer, log)
+	})
+
+	mux.HandleFunc("/indexes/deleted", func(w http.ResponseWriter, r *http.Request) {
+		handleIndexDeleted(w, r, cfg.ShardSyncer, log)
 	})
 
 	return mux
@@ -61,12 +109,10 @@ func handleDocumentIngest(w http.ResponseWriter, r *http.Request, idx Indexer, l
 		return
 	}
 
-	var payload map[string]any
-	if len(req.Payload) > 0 {
-		if err := json.Unmarshal(req.Payload, &payload); err != nil {
-			http.Error(w, "invalid payload body", http.StatusBadRequest)
-			return
-		}
+	// Pass raw payload bytes directly - validation happens at worker level
+	rawPayload := req.Payload
+	if len(rawPayload) == 0 {
+		rawPayload = []byte("{}")
 	}
 
 	cmd := document.Command{
@@ -74,7 +120,7 @@ func handleDocumentIngest(w http.ResponseWriter, r *http.Request, idx Indexer, l
 		ShardID:    req.ShardID,
 		DocumentID: req.DocumentID,
 		Routing:    req.Routing,
-		Payload:    payload,
+		RawPayload: rawPayload,
 	}
 
 	if err := idx.Index(r.Context(), cmd); err != nil {
@@ -98,4 +144,235 @@ func handleDocumentIngest(w http.ResponseWriter, r *http.Request, idx Indexer, l
 	)
 
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// bulkIngestRequest matches the BulkIngestRequest from the documents package.
+type bulkIngestRequest struct {
+	Documents []bulkDocument `json:"documents"`
+}
+
+type bulkDocument struct {
+	IndexID        string            `json:"index_id"`
+	ShardID        string            `json:"shard_id"`
+	DocumentID     string            `json:"document_id"`
+	Routing        map[string]string `json:"routing,omitempty"`
+	Payload        json.RawMessage   `json:"payload"`
+	MappingVersion int               `json:"mapping_version"`
+}
+
+type bulkIngestResponse struct {
+	Indexed int            `json:"indexed"`
+	Errors  []bulkDocError `json:"errors,omitempty"`
+}
+
+type bulkDocError struct {
+	DocumentID string `json:"document_id"`
+	Error      string `json:"error"`
+}
+
+func handleBulkDocumentIngest(w http.ResponseWriter, r *http.Request, idx Indexer, log logger.Logger) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if idx == nil {
+		http.Error(w, "indexer unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	defer r.Body.Close()
+	var req bulkIngestRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Documents) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(bulkIngestResponse{Indexed: 0})
+		return
+	}
+
+	response := bulkIngestResponse{}
+
+	for _, doc := range req.Documents {
+		// Pass raw payload bytes directly - validation happens at worker level
+		rawPayload := doc.Payload
+		if len(rawPayload) == 0 {
+			rawPayload = []byte("{}")
+		}
+
+		cmd := document.Command{
+			IndexID:    doc.IndexID,
+			ShardID:    doc.ShardID,
+			DocumentID: doc.DocumentID,
+			Routing:    doc.Routing,
+			RawPayload: rawPayload,
+		}
+
+		if err := idx.Index(r.Context(), cmd); err != nil {
+			response.Errors = append(response.Errors, bulkDocError{
+				DocumentID: doc.DocumentID,
+				Error:      err.Error(),
+			})
+			continue
+		}
+
+		response.Indexed++
+	}
+
+	log.Info("bulk documents ingested",
+		logger.Field{Key: "indexed", Value: response.Indexed},
+		logger.Field{Key: "errors", Value: len(response.Errors)},
+		logger.Field{Key: "total", Value: len(req.Documents)},
+	)
+
+	w.Header().Set("Content-Type", "application/json")
+	if len(response.Errors) > 0 && response.Indexed == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+	} else if len(response.Errors) > 0 {
+		w.WriteHeader(http.StatusMultiStatus)
+	} else {
+		w.WriteHeader(http.StatusAccepted)
+	}
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func handleSearch(w http.ResponseWriter, r *http.Request, searcher Searcher, log logger.Logger) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if searcher == nil {
+		http.Error(w, "search service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	defer r.Body.Close()
+	var req searchquery.Request
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid search payload", http.StatusBadRequest)
+		return
+	}
+
+	if err := req.Normalize(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := req.Validate(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// In standalone search node mode, shard_ids must be specified
+	if len(req.ShardIDs) == 0 {
+		http.Error(w, "shard_ids are required for search in standalone mode", http.StatusBadRequest)
+		return
+	}
+
+	response, err := searcher.Search(r.Context(), req)
+	if err != nil {
+		log.Error("search execution failed", logger.Field{Key: "error", Value: err})
+		http.Error(w, "search failed", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.Error("failed to encode search response", logger.Field{Key: "error", Value: err})
+		http.Error(w, "encoding failed", http.StatusInternalServerError)
+		return
+	}
+
+	log.Info("search executed",
+		logger.Field{Key: "shard_count", Value: len(req.ShardIDs)},
+		logger.Field{Key: "hits_total", Value: response.Total},
+		logger.Field{Key: "hits_returned", Value: len(response.Hits)},
+	)
+}
+
+type shardSyncRequest struct {
+	Assignments []shards.Assignment `json:"assignments"`
+}
+
+func handleShardSync(w http.ResponseWriter, r *http.Request, syncer ShardSyncer, log logger.Logger) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if syncer == nil {
+		http.Error(w, "shard syncer unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	defer r.Body.Close()
+	var req shardSyncRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Assignments) == 0 {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if err := syncer.Sync(req.Assignments); err != nil {
+		log.Error("shard sync failed", logger.Field{Key: "error", Value: err})
+		http.Error(w, "sync failed", http.StatusInternalServerError)
+		return
+	}
+
+	log.Info("synced shards from coordinator",
+		logger.Field{Key: "count", Value: len(req.Assignments)},
+	)
+
+	w.WriteHeader(http.StatusOK)
+}
+
+type indexDeletedRequest struct {
+	IndexID string `json:"index_id"`
+}
+
+func handleIndexDeleted(w http.ResponseWriter, r *http.Request, syncer ShardSyncer, log logger.Logger) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if syncer == nil {
+		http.Error(w, "shard syncer unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	defer r.Body.Close()
+	var req indexDeletedRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	if req.IndexID == "" {
+		http.Error(w, "index_id is required", http.StatusBadRequest)
+		return
+	}
+
+	if err := syncer.UnloadIndex(req.IndexID); err != nil {
+		log.Error("unload index failed",
+			logger.Field{Key: "index_id", Value: req.IndexID},
+			logger.Field{Key: "error", Value: err},
+		)
+		http.Error(w, "unload failed", http.StatusInternalServerError)
+		return
+	}
+
+	log.Info("unloaded index",
+		logger.Field{Key: "index_id", Value: req.IndexID},
+	)
+
+	w.WriteHeader(http.StatusOK)
 }

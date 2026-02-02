@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"plastic-engine-core/internal/core/search/hydration"
+	"plastic-engine-core/internal/core/stream_proxy/hydration"
 )
 
 // Factory creates a connector from settings.

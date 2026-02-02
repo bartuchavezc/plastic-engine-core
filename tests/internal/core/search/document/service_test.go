@@ -22,9 +22,7 @@ func TestServiceIndexPersistsDocument(t *testing.T) {
 		IndexID:    "idx",
 		ShardID:    "shard-1",
 		DocumentID: "doc-1",
-		Payload: map[string]any{
-			"title": "Hello Plastic Engine",
-		},
+		RawPayload: []byte(`{"title": "Hello Plastic Engine"}`),
 	}
 
 	if err := service.Index(context.Background(), cmd); err != nil {
@@ -113,7 +111,7 @@ func newTestService(t *testing.T) (*document.Service, *pebble.PebbleStore) {
 	planner := document.NewFieldPlanner(document.TokenizerFactory{}, document.AnalyzerFactory{})
 
 	writerFactory := func(s *shards.Shard) *document.IndexWriter {
-		return document.NewIndexWriter(s.Store)
+		return document.NewIndexWriter(s.Store, nil)
 	}
 
 	cfg := document.ShardWorkerConfig{

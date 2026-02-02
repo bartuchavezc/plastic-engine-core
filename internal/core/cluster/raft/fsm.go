@@ -52,6 +52,8 @@ func (f *FSM) Apply(logEntry *raft.Log) interface{} {
 	switch cmd.Type {
 	case cluster.CmdCreateIndex:
 		err = f.applyCreateIndex(cmd.Payload)
+	case cluster.CmdDeleteIndex:
+		err = f.applyDeleteIndex(cmd.Payload)
 	case cluster.CmdRegisterNode:
 		err = f.applyRegisterNode(cmd.Payload)
 	case cluster.CmdUpdateHeartbeat:
@@ -171,6 +173,47 @@ func (f *FSM) applyCreateIndex(payload json.RawMessage) error {
 				return fmt.Errorf("insert field mapping %s: %w", field.Name, err)
 			}
 		}
+	}
+
+	return tx.Commit()
+}
+
+func (f *FSM) applyDeleteIndex(payload json.RawMessage) error {
+	var p cluster.DeleteIndexPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return fmt.Errorf("unmarshal delete index payload: %w", err)
+	}
+
+	tx, err := f.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin delete index tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Delete shards first (FK constraint)
+	_, err = tx.Exec(`DELETE FROM shards WHERE index_id = ?`, p.ID)
+	if err != nil {
+		return fmt.Errorf("delete shards for index: %w", err)
+	}
+
+	// Delete field mappings
+	_, err = tx.Exec(`DELETE FROM index_fields WHERE index_id = ?`, p.ID)
+	if err != nil {
+		return fmt.Errorf("delete field mappings for index: %w", err)
+	}
+
+	// Delete mappings if table exists
+	_, _ = tx.Exec(`DELETE FROM mappings WHERE index_id = ?`, p.ID)
+
+	// Delete the index
+	res, err := tx.Exec(`DELETE FROM indexes WHERE id = ?`, p.ID)
+	if err != nil {
+		return fmt.Errorf("delete index: %w", err)
+	}
+
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("index %s not found", p.ID)
 	}
 
 	return tx.Commit()

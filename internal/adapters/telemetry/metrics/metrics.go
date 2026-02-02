@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -16,8 +17,29 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 
 	promclient "github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+// Global metrics provider singleton
+var (
+	globalProvider *Provider
+	globalMu       sync.RWMutex
+)
+
+// SetGlobalProvider sets the global metrics provider.
+func SetGlobalProvider(p *Provider) {
+	globalMu.Lock()
+	defer globalMu.Unlock()
+	globalProvider = p
+}
+
+// Global returns the global metrics provider, or nil if not set.
+func Global() *Provider {
+	globalMu.RLock()
+	defer globalMu.RUnlock()
+	return globalProvider
+}
 
 // Config holds metrics configuration.
 type Config struct {
@@ -52,6 +74,19 @@ type Provider struct {
 	NodesJoined       metric.Int64Counter
 	SearchQueries     metric.Int64Counter
 
+	// Indexing metrics (granular)
+	IndexingBatchDuration metric.Float64Histogram
+	IndexingBatchSize     metric.Int64Histogram
+	IndexingTokensTotal   metric.Int64Counter
+	IndexingQueueSize     metric.Int64UpDownCounter
+	IndexingWriteDuration metric.Float64Histogram
+
+	// Search metrics (granular)
+	SearchDuration       metric.Float64Histogram
+	SearchShardsQueried  metric.Int64Counter
+	SearchHitsTotal      metric.Int64Counter
+	SearchPostingsScanned metric.Int64Counter
+
 	// Prometheus registry if enabled
 	promRegistry *promclient.Registry
 }
@@ -79,6 +114,19 @@ func Init(ctx context.Context, cfg Config) (*Provider, func(context.Context) err
 	// Prometheus exporter (for /metrics endpoint)
 	if cfg.EnablePrometheus {
 		promRegistry = promclient.NewRegistry()
+
+		// Register Go runtime collectors for system metrics:
+		// - go_memstats_alloc_bytes (heap memory usage)
+		// - go_goroutines (number of goroutines)
+		// - go_gc_* (garbage collection metrics)
+		promRegistry.MustRegister(collectors.NewGoCollector())
+
+		// Register process collector for OS-level metrics:
+		// - process_cpu_seconds_total (CPU usage)
+		// - process_resident_memory_bytes (RSS memory)
+		// - process_open_fds (open file descriptors)
+		promRegistry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+
 		promExporter, err := prometheus.New(
 			prometheus.WithRegisterer(promRegistry),
 		)
@@ -127,6 +175,16 @@ func Init(ctx context.Context, cfg Config) (*Provider, func(context.Context) err
 
 	// Initialize business metrics
 	if err := provider.initBusinessMetrics(); err != nil {
+		return nil, nil, err
+	}
+
+	// Initialize indexing metrics
+	if err := provider.initIndexingMetrics(); err != nil {
+		return nil, nil, err
+	}
+
+	// Initialize search metrics
+	if err := provider.initSearchMetrics(); err != nil {
 		return nil, nil, err
 	}
 
@@ -344,5 +402,155 @@ func statusClass(code int) string {
 	default:
 		return "1xx"
 	}
+}
+
+// Indexing metrics initialization and recording
+
+func (p *Provider) initIndexingMetrics() error {
+	var err error
+
+	p.IndexingBatchDuration, err = p.meter.Float64Histogram(
+		"plastic_indexing_batch_duration_seconds",
+		metric.WithDescription("Duration of batch flush operations in seconds"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
+	)
+	if err != nil {
+		return fmt.Errorf("create indexing_batch_duration: %w", err)
+	}
+
+	p.IndexingBatchSize, err = p.meter.Int64Histogram(
+		"plastic_indexing_batch_size",
+		metric.WithDescription("Number of documents per batch"),
+		metric.WithUnit("{document}"),
+		metric.WithExplicitBucketBoundaries(1, 5, 10, 25, 50, 100, 250, 500, 1000),
+	)
+	if err != nil {
+		return fmt.Errorf("create indexing_batch_size: %w", err)
+	}
+
+	p.IndexingTokensTotal, err = p.meter.Int64Counter(
+		"plastic_indexing_tokens_total",
+		metric.WithDescription("Total number of tokens processed during indexing"),
+		metric.WithUnit("{token}"),
+	)
+	if err != nil {
+		return fmt.Errorf("create indexing_tokens_total: %w", err)
+	}
+
+	p.IndexingQueueSize, err = p.meter.Int64UpDownCounter(
+		"plastic_indexing_queue_size",
+		metric.WithDescription("Current size of the indexing queue per shard"),
+		metric.WithUnit("{item}"),
+	)
+	if err != nil {
+		return fmt.Errorf("create indexing_queue_size: %w", err)
+	}
+
+	p.IndexingWriteDuration, err = p.meter.Float64Histogram(
+		"plastic_indexing_write_duration_seconds",
+		metric.WithDescription("Duration of Pebble write operations in seconds"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5),
+	)
+	if err != nil {
+		return fmt.Errorf("create indexing_write_duration: %w", err)
+	}
+
+	return nil
+}
+
+// RecordIndexingBatch records metrics for a batch indexing operation.
+func (p *Provider) RecordIndexingBatch(ctx context.Context, shardID string, batchSize int, duration time.Duration) {
+	attrs := []attribute.KeyValue{
+		attribute.String("shard_id", shardID),
+	}
+	p.IndexingBatchDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(attrs...))
+	p.IndexingBatchSize.Record(ctx, int64(batchSize), metric.WithAttributes(attrs...))
+}
+
+// RecordIndexingTokens records the number of tokens processed.
+func (p *Provider) RecordIndexingTokens(ctx context.Context, shardID, field string, count int64) {
+	p.IndexingTokensTotal.Add(ctx, count, metric.WithAttributes(
+		attribute.String("shard_id", shardID),
+		attribute.String("field", field),
+	))
+}
+
+// RecordIndexingQueueChange records changes to the indexing queue size.
+func (p *Provider) RecordIndexingQueueChange(ctx context.Context, shardID string, delta int64) {
+	p.IndexingQueueSize.Add(ctx, delta, metric.WithAttributes(
+		attribute.String("shard_id", shardID),
+	))
+}
+
+// RecordIndexingWrite records the duration of a Pebble write operation.
+func (p *Provider) RecordIndexingWrite(ctx context.Context, shardID string, duration time.Duration) {
+	p.IndexingWriteDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(
+		attribute.String("shard_id", shardID),
+	))
+}
+
+// Search metrics initialization and recording
+
+func (p *Provider) initSearchMetrics() error {
+	var err error
+
+	p.SearchDuration, err = p.meter.Float64Histogram(
+		"plastic_search_duration_seconds",
+		metric.WithDescription("Duration of search queries in seconds"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
+	)
+	if err != nil {
+		return fmt.Errorf("create search_duration: %w", err)
+	}
+
+	p.SearchShardsQueried, err = p.meter.Int64Counter(
+		"plastic_search_shards_queried_total",
+		metric.WithDescription("Total number of shards queried"),
+		metric.WithUnit("{shard}"),
+	)
+	if err != nil {
+		return fmt.Errorf("create search_shards_queried: %w", err)
+	}
+
+	p.SearchHitsTotal, err = p.meter.Int64Counter(
+		"plastic_search_hits_total",
+		metric.WithDescription("Total number of search hits returned"),
+		metric.WithUnit("{hit}"),
+	)
+	if err != nil {
+		return fmt.Errorf("create search_hits_total: %w", err)
+	}
+
+	p.SearchPostingsScanned, err = p.meter.Int64Counter(
+		"plastic_search_postings_scanned_total",
+		metric.WithDescription("Total number of postings scanned during search"),
+		metric.WithUnit("{posting}"),
+	)
+	if err != nil {
+		return fmt.Errorf("create search_postings_scanned: %w", err)
+	}
+
+	return nil
+}
+
+// RecordSearchQueryMetrics records detailed metrics for a search query execution.
+func (p *Provider) RecordSearchQueryMetrics(ctx context.Context, queryType string, shardCount int, hitsCount int64, duration time.Duration) {
+	attrs := []attribute.KeyValue{
+		attribute.String("query_type", queryType),
+	}
+	p.SearchDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(attrs...))
+	p.SearchShardsQueried.Add(ctx, int64(shardCount), metric.WithAttributes(attrs...))
+	p.SearchHitsTotal.Add(ctx, hitsCount, metric.WithAttributes(attrs...))
+}
+
+// RecordSearchPostingsScanned records the number of postings scanned.
+func (p *Provider) RecordSearchPostingsScanned(ctx context.Context, shardID, queryType string, count int64) {
+	p.SearchPostingsScanned.Add(ctx, count, metric.WithAttributes(
+		attribute.String("shard_id", shardID),
+		attribute.String("query_type", queryType),
+	))
 }
 

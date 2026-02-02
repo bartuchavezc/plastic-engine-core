@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"plastic-engine-core/internal/core/search/hydration"
-	"plastic-engine-core/internal/core/search/hydration/connector"
+	"plastic-engine-core/internal/core/stream_proxy/hydration"
+	"plastic-engine-core/internal/core/stream_proxy/hydration/connector"
 )
 
 func TestInternalConnectorStoreAndFetch(t *testing.T) {

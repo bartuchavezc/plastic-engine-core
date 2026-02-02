@@ -15,7 +15,7 @@ func TestShardWorkerProcessesDocument(t *testing.T) {
 	t.Parallel()
 
 	store := newTestPebbleStore(t)
-	writer := document.NewIndexWriter(store)
+	writer := document.NewIndexWriter(store, nil)
 
 	registry := &stubShardRegistry{
 		shards: map[string]*shards.Shard{
@@ -55,9 +55,7 @@ func TestShardWorkerProcessesDocument(t *testing.T) {
 
 	cmd := document.Command{
 		DocumentID: "doc-1",
-		Payload: map[string]any{
-			"title": "Hello Plastic Engine",
-		},
+		RawPayload: []byte(`{"title": "Hello Plastic Engine"}`),
 	}
 
 	if err := worker.Submit(context.Background(), document.WorkItem{Command: cmd}); err != nil {
@@ -75,7 +73,7 @@ func TestShardWorkerBackpressure(t *testing.T) {
 	t.Parallel()
 
 	store := newTestPebbleStore(t)
-	writer := document.NewIndexWriter(store)
+	writer := document.NewIndexWriter(store, nil)
 
 	registry := &stubShardRegistry{
 		shards: map[string]*shards.Shard{
@@ -113,11 +111,11 @@ func TestShardWorkerBackpressure(t *testing.T) {
 	defer worker.Close()
 
 	ctx := context.Background()
-	if err := worker.Submit(ctx, document.WorkItem{Command: document.Command{DocumentID: "doc-1", Payload: map[string]any{"title": "hello"}}}); err != nil {
+	if err := worker.Submit(ctx, document.WorkItem{Command: document.Command{DocumentID: "doc-1", RawPayload: []byte(`{"title": "hello"}`)}}); err != nil {
 		t.Fatalf("Submit first: %v", err)
 	}
 
-	if err := worker.Submit(ctx, document.WorkItem{Command: document.Command{DocumentID: "doc-2", Payload: map[string]any{"title": "world"}}}); err == nil {
+	if err := worker.Submit(ctx, document.WorkItem{Command: document.Command{DocumentID: "doc-2", RawPayload: []byte(`{"title": "world"}`)}}); err == nil {
 		t.Fatalf("expected backpressure error for second item")
 	}
 }

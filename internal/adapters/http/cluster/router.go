@@ -3,6 +3,7 @@ package clusterhttp
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -20,6 +21,11 @@ import (
 func NewRouter(coord *cluster.Coordinator, joinService *nodes.JoinService) http.Handler {
 	r := chi.NewRouter()
 
+	// Create HTTP client for communication with nodes
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
 	clusterindex.Mount(r, coord)
 	clustermanagement.Mount(r, coord)
 	r.Post("/cluster/join", func(w http.ResponseWriter, req *http.Request) {
@@ -28,7 +34,7 @@ func NewRouter(coord *cluster.Coordinator, joinService *nodes.JoinService) http.
 	r.Post("/cluster/heartbeat", func(w http.ResponseWriter, req *http.Request) {
 		handleHeartbeat(w, req, joinService)
 	})
-	clustersearchhttp.Mount(r, coord)
+	clustersearchhttp.Mount(r, coord, httpClient)
 	r.Mount("/debug", middleware.Profiler())
 
 	return r

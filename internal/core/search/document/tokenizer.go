@@ -24,7 +24,8 @@ type TokenizerFactory struct{}
 // NewTokenizer builds a tokenizer by identifier.
 func (f TokenizerFactory) NewTokenizer(name string) (Tokenizer, error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "", "whitespace":
+	case "", "whitespace", "standard":
+		// "standard" maps to whitespace for now; can be replaced with a proper standard tokenizer later
 		return WhitespaceTokenizer{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported tokenizer %q", name)

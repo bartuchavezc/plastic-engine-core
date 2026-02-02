@@ -1,0 +1,7 @@
+data/
+coordinator-standalone
+search-node
+TODO.md
+cluster.db
+raft-data/
+bin/

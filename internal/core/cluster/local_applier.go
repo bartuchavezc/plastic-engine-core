@@ -38,6 +38,8 @@ func (a *LocalApplier) Apply(ctx context.Context, cmd Command) error {
 	switch cmd.Type {
 	case CmdCreateIndex:
 		return a.applyCreateIndex(ctx, cmd.Payload)
+	case CmdDeleteIndex:
+		return a.applyDeleteIndex(ctx, cmd.Payload)
 	case CmdRegisterNode:
 		return a.applyRegisterNode(ctx, cmd.Payload)
 	case CmdUpdateHeartbeat:
@@ -92,14 +94,16 @@ func (a *LocalApplier) applyCreateIndex(ctx context.Context, payload json.RawMes
 		shardConfig = string(p.ShardConfig)
 	}
 
+	refreshTimeMs := p.RefreshTime.Milliseconds()
+
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO indexes (
 			id, name, shard_strategy, shard_template, shard_config,
-			default_analyzer, default_tokenizer, mapping_version,
+			default_analyzer, default_tokenizer, mapping_version, refresh_time,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.ID, p.Name, p.ShardStrategy, p.ShardTemplate, shardConfig,
-		p.DefaultAnalyzer, p.DefaultTokenizer, p.MappingVersion,
+		p.DefaultAnalyzer, p.DefaultTokenizer, p.MappingVersion, refreshTimeMs,
 		now, now,
 	)
 	if err != nil {
@@ -148,6 +152,55 @@ func (a *LocalApplier) applyCreateIndex(ctx context.Context, payload json.RawMes
 	a.log.Info("index created via applier",
 		logger.Field{Key: "index_id", Value: p.ID},
 		logger.Field{Key: "name", Value: p.Name},
+	)
+
+	return nil
+}
+
+func (a *LocalApplier) applyDeleteIndex(ctx context.Context, payload json.RawMessage) error {
+	var p DeleteIndexPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return fmt.Errorf("unmarshal delete index payload: %w", err)
+	}
+
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin delete index tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Delete shards first (FK constraint)
+	_, err = tx.ExecContext(ctx, `DELETE FROM shards WHERE index_id = ?`, p.ID)
+	if err != nil {
+		return fmt.Errorf("delete shards for index: %w", err)
+	}
+
+	// Delete field mappings
+	_, err = tx.ExecContext(ctx, `DELETE FROM index_fields WHERE index_id = ?`, p.ID)
+	if err != nil {
+		return fmt.Errorf("delete field mappings for index: %w", err)
+	}
+
+	// Delete mappings if table exists
+	_, _ = tx.ExecContext(ctx, `DELETE FROM mappings WHERE index_id = ?`, p.ID)
+
+	// Delete the index
+	res, err := tx.ExecContext(ctx, `DELETE FROM indexes WHERE id = ?`, p.ID)
+	if err != nil {
+		return fmt.Errorf("delete index: %w", err)
+	}
+
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("index %s not found", p.ID)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delete index: %w", err)
+	}
+
+	a.log.Info("index deleted via applier",
+		logger.Field{Key: "index_id", Value: p.ID},
 	)
 
 	return nil

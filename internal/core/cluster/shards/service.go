@@ -133,7 +133,6 @@ func (s *Service) LoadAssignmentsForNodeTx(ctx context.Context, tx *sql.Tx, node
 	return s.repo.LoadAssignmentsForNodeTx(ctx, tx, nodeID)
 }
 
-
 // List returns shards matching the filter.
 func (s *Service) List(ctx context.Context, filter ShardFilter) ([]ShardRecord, error) {
 	return s.repo.List(ctx, filter)
@@ -154,3 +153,7 @@ func (s *Service) LookupPrimary(ctx context.Context, indexID, shardKey string) (
 	return shardInfo, nodeInfo, nil
 }
 
+// LookupNode resolves a node by identifier and returns its information.
+func (s *Service) LookupNode(ctx context.Context, nodeID string) (NodeInfo, error) {
+	return s.repo.LookupNode(ctx, nodeID)
+}

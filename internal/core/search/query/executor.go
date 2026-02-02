@@ -26,6 +26,8 @@ type ShardStore interface {
 	GetFloat64(key string) (float64, error)
 	PrefixScan(prefix string) ([]pebble.KeyValue, error)
 	PrefixScanKeys(prefix string) ([]string, error)
+	// MergeInt64 atomically adds delta to the int64 at key (required by TermRegistry).
+	MergeInt64(key string, delta int64) error
 }
 
 // Executor executes queries against a single shard.
@@ -111,8 +113,14 @@ func (e *Executor) executeTerm(ctx context.Context, q TermQuery, scoringCtx Scor
 		return nil, nil // No matches
 	}
 
+	// Get DF for this term (stored separately)
+	df, err := e.termRegistry.GetDF(ctx, q.Field, termValue)
+	if err != nil {
+		return nil, fmt.Errorf("get term df: %w", err)
+	}
+
 	// Update scoring context with this term's DF
-	scoringCtx.TermDF[entry.TermID] = entry.DF
+	scoringCtx.TermDF[entry.TermID] = df
 
 	// Scan postings
 	return e.scanPostings(ctx, entry.TermID, q.Field, 1.0, scoringCtx)
@@ -134,7 +142,12 @@ func (e *Executor) executeMatch(ctx context.Context, q MatchQuery, scoringCtx Sc
 		}
 		if found {
 			termIDs = append(termIDs, entry.TermID)
-			scoringCtx.TermDF[entry.TermID] = entry.DF
+			// Get DF for this term (stored separately)
+			df, err := e.termRegistry.GetDF(ctx, q.Field, token)
+			if err != nil {
+				return nil, fmt.Errorf("get term df %s: %w", token, err)
+			}
+			scoringCtx.TermDF[entry.TermID] = df
 		}
 	}
 

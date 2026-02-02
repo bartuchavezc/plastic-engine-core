@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 	searchnode "plastic-engine-core/internal/core/search"
 	client "plastic-engine-core/internal/core/search/client"
 	"plastic-engine-core/internal/core/search/document"
+	searchquery "plastic-engine-core/internal/core/search/query"
 	"plastic-engine-core/internal/core/search/shards"
 	"plastic-engine-core/internal/pkg/logger"
 )
@@ -89,6 +91,7 @@ func main() {
 		log.Error("failed to initialise metrics", logger.Field{Key: "error", Value: err})
 		os.Exit(1)
 	}
+	metrics.SetGlobalProvider(metricsProvider)
 	defer func() {
 		if metricsShutdown != nil {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -105,12 +108,19 @@ func main() {
 		DataDir:       dataDir,
 	}
 
-	clusterClient := client.NewClient(joinAddr, &http.Client{
+	httpClient := &http.Client{
 		Timeout: 10 * time.Second,
-	})
+	}
+	clusterClient := client.NewClient(joinAddr, httpClient)
 	manager := shards.NewManager(dataDir)
 
-	node := searchnode.New(nodeInfo, joinAddr, clusterClient, manager, log)
+	// Create definition fetcher for mapping refreshes
+	definitionFetcher := client.NewDefinitionFetcher(clusterClient)
+
+	// Create metadata resolver with definition fetcher for mapping refreshes
+	resolver := document.NewMetadataResolver(definitionFetcher)
+
+	node := searchnode.NewWithMappingRefresher(nodeInfo, joinAddr, clusterClient, manager, resolver, log)
 
 	if err := node.Initialize(); err != nil {
 		log.Error("failed to initialise search node", logger.Field{Key: "error", Value: err})
@@ -119,11 +129,10 @@ func main() {
 
 	log.Info("search node initialised", logger.Field{Key: "node_id", Value: node.Info.ID})
 
-	resolver := document.NewMetadataResolver(nil)
 	assignmentProvider := document.NewAssignmentProvider(manager, resolver)
 	planner := document.NewFieldPlanner(document.TokenizerFactory{}, document.AnalyzerFactory{})
 	writerFactory := func(sh *shards.Shard) *document.IndexWriter {
-		return document.NewIndexWriter(sh.Store)
+		return document.NewIndexWriter(sh.Store, log)
 	}
 
 	workerCfg := document.ShardWorkerConfig{
@@ -134,8 +143,18 @@ func main() {
 	indexService := document.NewService(manager, assignmentProvider, planner, writerFactory, workerCfg, log)
 	defer indexService.Close()
 
+	// Create search service with shard store getter
+	getShardStore := func(shardID string) (searchquery.ShardStore, bool) {
+		shard, ok := manager.GetShard(shardID)
+		if !ok {
+			return nil, false
+		}
+		return shard.Store, true
+	}
+	searchService := searchquery.NewSearchService(getShardStore, log)
+
 	// Build router with observability middleware
-	baseRouter := searchhttp.NewRouter(indexService, log)
+	baseRouter := searchhttp.NewRouter(indexService, searchService, manager, log)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Recovery(log))
@@ -144,7 +163,7 @@ func main() {
 		ServiceName: serviceName,
 		Logger:      log,
 		Metrics:     metricsProvider,
-		SkipPaths:   []string{"/health", "/ready", "/metrics"},
+		SkipPaths:   []string{"/health", "/ready", "/metrics", "/debug/pprof/"},
 	}))
 	r.Mount("/", baseRouter)
 
@@ -163,6 +182,18 @@ func main() {
 			_, _ = w.Write([]byte("not ready"))
 		}
 	})
+
+	// pprof endpoints for profiling
+	r.HandleFunc("/debug/pprof/", pprof.Index)
+	r.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	r.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	r.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	r.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	r.Handle("/debug/pprof/heap", pprof.Handler("heap"))
+	r.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
+	r.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
+	r.Handle("/debug/pprof/block", pprof.Handler("block"))
+	r.Handle("/debug/pprof/mutex", pprof.Handler("mutex"))
 
 	httpServer := &http.Server{
 		Addr:         listenAddr,

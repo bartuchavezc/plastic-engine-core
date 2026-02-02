@@ -155,6 +155,7 @@ type CreateIndexPayload struct {
 	DefaultTokenizer string          `json:"default_tokenizer"`
 	MappingVersion   int             `json:"mapping_version"`
 	FieldMappings    json.RawMessage `json:"field_mappings,omitempty"`
+	RefreshTime      time.Duration   `json:"refresh_time,omitempty"`
 	CreatedAt        time.Time       `json:"created_at"`
 }
 
@@ -193,5 +194,10 @@ type AssignShardPayload struct {
 type UpdateShardStatePayload struct {
 	ShardID string `json:"shard_id"`
 	State   string `json:"state"`
+}
+
+// DeleteIndexPayload contains data for deleting an index.
+type DeleteIndexPayload struct {
+	ID string `json:"id"`
 }
 

@@ -100,6 +100,33 @@ Plastic Engine propaga el contexto de traza usando W3C TraceContext:
 | `plastic_nodes_joined_total` | Counter | role | Nodos que hicieron join |
 | `plastic_search_queries_total` | Counter | index_id | Búsquedas ejecutadas |
 
+### System Metrics (Go Runtime)
+
+| Métrica | Tipo | Descripción |
+|---------|------|-------------|
+| `go_memstats_alloc_bytes` | Gauge | Bytes de memoria heap en uso |
+| `go_goroutines` | Gauge | Número de goroutines activas |
+| `go_gc_duration_seconds` | Summary | Duración de pausas de GC |
+| `process_cpu_seconds_total` | Counter | Segundos de CPU consumidos |
+| `process_resident_memory_bytes` | Gauge | Memoria residente (RSS) |
+| `process_open_fds` | Gauge | File descriptors abiertos |
+
+#### Queries útiles para System Metrics
+
+```promql
+# Uso de CPU (ratio por minuto)
+rate(process_cpu_seconds_total[1m])
+
+# Memoria heap en uso (MB)
+go_memstats_alloc_bytes / 1024 / 1024
+
+# Número de goroutines (detectar leaks)
+go_goroutines
+
+# Tasa de GC por minuto
+rate(go_gc_duration_seconds_count[1m])
+```
+
 ### Buckets de Latencia
 
 El histograma de latencias usa los siguientes buckets (en segundos):
@@ -184,13 +211,38 @@ groups:
           
       - alert: NoHeartbeats
         expr: |
-          increase(plastic_nodes_joined_total[5m]) == 0 
+          increase(plastic_nodes_joined_total[5m]) == 0
           and sum(plastic_shards_assigned_total) > 0
         for: 10m
         labels:
           severity: warning
         annotations:
           summary: "No new nodes joining but shards exist"
+
+      - alert: HighGoroutineCount
+        expr: go_goroutines > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High goroutine count - possible goroutine leak"
+
+      - alert: HighMemoryUsage
+        expr: |
+          go_memstats_alloc_bytes / 1024 / 1024 > 500
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Heap memory usage above 500MB"
+
+      - alert: HighCPUUsage
+        expr: rate(process_cpu_seconds_total[1m]) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU usage above 80%"
 ```
 
 ## Dashboards Grafana
@@ -216,6 +268,21 @@ histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m]))
 ### Panel: Active Shards per Node
 ```
 sum(plastic_shards_assigned_total) by (node_id)
+```
+
+### Panel: Goroutines
+```
+go_goroutines
+```
+
+### Panel: Memory Usage (MB)
+```
+go_memstats_alloc_bytes / 1024 / 1024
+```
+
+### Panel: CPU Usage
+```
+rate(process_cpu_seconds_total[1m])
 ```
 
 ## Debugging con Traces

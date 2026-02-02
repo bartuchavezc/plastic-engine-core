@@ -15,7 +15,7 @@ import (
 func TestNewRouterHealthz(t *testing.T) {
 	t.Parallel()
 
-	router := searchhttp.NewRouter(&stubIndexer{}, logger.DefaultLogger())
+	router := searchhttp.NewRouter(&stubIndexer{}, nil, nil, logger.DefaultLogger())
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rr := httptest.NewRecorder()
 
@@ -34,7 +34,7 @@ func TestDocumentsEndpointCallsIndexer(t *testing.T) {
 	t.Parallel()
 
 	idx := &stubIndexer{}
-	router := searchhttp.NewRouter(idx, logger.DefaultLogger())
+	router := searchhttp.NewRouter(idx, nil, nil, logger.DefaultLogger())
 
 	body := []byte(`{
 		"index_id": "idx",

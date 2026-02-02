@@ -1,13 +1,167 @@
 version: "3.9"
 
 services:
+  # =============================================================================
+  # Plastic Engine Services
+  # =============================================================================
+
+  coordinator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: plastic-coordinator
+    command: ["/app/coordinator-standalone"]
+    ports:
+      - "8080:8080"   # API
+      - "9091:9091"   # Metrics
+    environment:
+      - PORT=8080
+      - DB_PATH=/app/data/cluster.db
+      - ENABLE_PROMETHEUS=true
+      - METRICS_PORT=9091
+      - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
+      - OTEL_EXPORTER_OTLP_INSECURE=true
+    volumes:
+      - coordinator-data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - plastic-net
+    depends_on:
+      - jaeger
+
+  search-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: plastic-search-1
+    command: ["/app/search"]
+    ports:
+      - "9003:9090"   # API
+      - "9101:9091"   # Metrics
+    environment:
+      - ROLE=search
+      - PORT=9090
+      - JOIN_ADDR=http://coordinator:8080
+      - ADVERTISE_ADDR=http://search-1:9090
+      - DATA_DIR=/app/data
+      - ENABLE_PROMETHEUS=true
+      - METRICS_PORT=9091
+      - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
+      - OTEL_EXPORTER_OTLP_INSECURE=true
+    volumes:
+      - search-1-data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - plastic-net
+    depends_on:
+      coordinator:
+        condition: service_healthy
+
+  search-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: plastic-search-2
+    command: ["/app/search"]
+    ports:
+      - "9002:9090"   # API
+      - "9102:9092"   # Metrics
+    environment:
+      - ROLE=search
+      - PORT=9090
+      - JOIN_ADDR=http://coordinator:8080
+      - ADVERTISE_ADDR=http://search-2:9090
+      - DATA_DIR=/app/data
+      - ENABLE_PROMETHEUS=true
+      - METRICS_PORT=9092
+      - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
+      - OTEL_EXPORTER_OTLP_INSECURE=true
+    volumes:
+      - search-2-data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - plastic-net
+    depends_on:
+      coordinator:
+        condition: service_healthy
+
+  # =============================================================================
+  # Observability Stack
+  # =============================================================================
+
   jaeger:
     image: jaegertracing/all-in-one:1.57
-    container_name: plastic-engine-jaeger
+    container_name: plastic-jaeger
     ports:
-      - "16686:16686" # Jaeger UI
-      - "14268:14268" # HTTP collector
-      - "4317:4317"   # OTLP gRPC
+      - "16686:16686"   # Jaeger UI
+      - "14268:14268"   # HTTP collector
+      - "4317:4317"     # OTLP gRPC
     environment:
       - COLLECTOR_OTLP_ENABLED=true
+    networks:
+      - plastic-net
 
+  prometheus:
+    image: prom/prometheus:v2.50.0
+    container_name: plastic-prometheus
+    ports:
+      - "9093:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - plastic-net
+    depends_on:
+      - coordinator
+      - search-1
+      - search-2
+
+  grafana:
+    image: grafana/grafana:10.3.0
+    container_name: plastic-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      - plastic-net
+    depends_on:
+      - prometheus
+      - jaeger
+
+# =============================================================================
+# Networks & Volumes
+# =============================================================================
+
+networks:
+  plastic-net:
+    driver: bridge
+
+volumes:
+  coordinator-data:
+  search-1-data:
+  search-2-data:
+  prometheus-data:
+  grafana-data:

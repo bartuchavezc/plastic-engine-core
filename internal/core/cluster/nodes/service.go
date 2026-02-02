@@ -115,7 +115,7 @@ func (s *Service) Join(ctx context.Context, req JoinRequest) (JoinResponse, erro
 
 	return JoinResponse{
 		NodeID: nodeID,
-		Shards: assignments,
+		Shards: append(assignments, newAssignments...),
 	}, nil
 }
 
@@ -277,4 +277,3 @@ func (s *Service) enrichAssignments(ctx context.Context, assignments []searchsha
 
 	return assignments, nil
 }
-

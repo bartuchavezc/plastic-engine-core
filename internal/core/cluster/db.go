@@ -76,6 +76,7 @@ func initializeCoordinatorSchema(db *sql.DB) error {
 			default_tokenizer TEXT NOT NULL,
 			mapping_version INTEGER NOT NULL DEFAULT 1,
 			dynamic_mode TEXT NOT NULL DEFAULT 'true',
+			refresh_time INTEGER DEFAULT 0, -- milliseconds
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL
 		);`,
@@ -157,6 +158,13 @@ func initializeCoordinatorSchema(db *sql.DB) error {
 	if _, err := db.Exec(`ALTER TABLE indexes ADD COLUMN dynamic_mode TEXT NOT NULL DEFAULT 'true'`); err != nil {
 		if !strings.Contains(err.Error(), "duplicate column name") {
 			return fmt.Errorf("add indexes.dynamic_mode column: %w", err)
+		}
+	}
+
+	// Migration: add refresh_time column for batching configuration
+	if _, err := db.Exec(`ALTER TABLE indexes ADD COLUMN refresh_time INTEGER DEFAULT 0`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("add indexes.refresh_time column: %w", err)
 		}
 	}
 

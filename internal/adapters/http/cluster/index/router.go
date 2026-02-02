@@ -4,11 +4,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/tidwall/gjson"
 	"go.opentelemetry.io/otel"
 
 	clusterhttputil "plastic-engine-core/internal/adapters/http/cluster/httputil"
@@ -29,7 +33,9 @@ func Mount(r chi.Router, coord *cluster.Coordinator) {
 	r.Get("/indexes", handler.handleListIndexes)
 	r.Get("/indexes/{id}", handler.handleGetIndex)
 	r.Post("/indexes", handler.handleCreateIndex)
+	r.Delete("/indexes/{id}", handler.handleDeleteIndex)
 	r.Post("/indexes/{id}/documents", handler.handleIngestDocument)
+	r.Post("/indexes/{id}/documents/_bulk", handler.handleBulkIngest)
 
 	// Mapping endpoints
 	r.Get("/indexes/{id}/mapping", handler.handleGetMapping)
@@ -47,7 +53,8 @@ type createIndexRequest struct {
 	DefaultAnalyzer  string                   `json:"default_analyzer"`
 	DefaultTokenizer string                   `json:"default_tokenizer"`
 	MappingVersion   int                      `json:"mapping_version"`
-	Dynamic          string                   `json:"dynamic"` // "true", "false", "strict"
+	Dynamic          string                   `json:"dynamic"`      // "true", "false", "strict"
+	RefreshTime      *string                  `json:"refresh_time"` // e.g., "1s", "500ms"
 	FieldMappings    []createFieldMappingBody `json:"field_mappings"`
 	InitialShardKeys []string                 `json:"initial_shard_keys"`
 }
@@ -175,6 +182,16 @@ func (h *handler) handleCreateIndex(w http.ResponseWriter, r *http.Request) {
 		ShardConfig:      convertShardConfig(payload.ShardConfig),
 	}
 
+	// Parse refresh time if provided
+	if payload.RefreshTime != nil && *payload.RefreshTime != "" {
+		refreshTime, err := time.ParseDuration(*payload.RefreshTime)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("invalid refresh_time format: %v", err), http.StatusBadRequest)
+			return
+		}
+		req.RefreshTime = refreshTime
+	}
+
 	for _, fm := range payload.FieldMappings {
 		field := indexes.FieldMapping{
 			Name:      fm.Name,
@@ -292,6 +309,158 @@ func (h *handler) handleIngestDocument(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+// bulkIngestResponse is the response for bulk ingest operations.
+type bulkIngestResponse struct {
+	Indexed int              `json:"indexed"`
+	Failed  int              `json:"failed"`
+	Errors  []bulkIngestError `json:"errors,omitempty"`
+}
+
+type bulkIngestError struct {
+	Index      int    `json:"index"`
+	DocumentID string `json:"document_id,omitempty"`
+	Error      string `json:"error"`
+}
+
+// handleBulkIngest processes an array of documents for bulk ingestion.
+// Request body: array of objects with document_id and payload fields
+// Example: [{"document_id": "1", "payload": {...}}, {"document_id": "2", "payload": {...}}]
+func (h *handler) handleBulkIngest(w http.ResponseWriter, r *http.Request) {
+	ctx, span := tracer.Start(r.Context(), "cluster.bulkIngest")
+	defer span.End()
+
+	indexID := chi.URLParam(r, "id")
+	if indexID == "" {
+		http.Error(w, "missing index id in path", http.StatusBadRequest)
+		return
+	}
+
+	// Read the entire body as raw bytes for gjson parsing
+	body, err := io.ReadAll(io.LimitReader(r.Body, 100<<20)) // 100MB limit
+	if err != nil {
+		http.Error(w, "failed to read request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate it's a JSON array
+	if !gjson.ValidBytes(body) {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	parsed := gjson.ParseBytes(body)
+	if !parsed.IsArray() {
+		http.Error(w, "request body must be a JSON array", http.StatusBadRequest)
+		return
+	}
+
+	docs := parsed.Array()
+	if len(docs) == 0 {
+		clusterhttputil.WriteJSON(w, http.StatusOK, bulkIngestResponse{Indexed: 0})
+		return
+	}
+
+	// Process documents concurrently with bounded parallelism
+	var (
+		indexed   int64
+		failed    int64
+		errorsMu  sync.Mutex
+		errors    []bulkIngestError
+		wg        sync.WaitGroup
+		semaphore = make(chan struct{}, 32) // Max 32 concurrent ingests
+	)
+
+	for i, doc := range docs {
+		if !doc.IsObject() {
+			errorsMu.Lock()
+			errors = append(errors, bulkIngestError{
+				Index: i,
+				Error: "document must be an object",
+			})
+			errorsMu.Unlock()
+			atomic.AddInt64(&failed, 1)
+			continue
+		}
+
+		// Extract document_id using gjson
+		docID := doc.Get("document_id").String()
+		if docID == "" {
+			errorsMu.Lock()
+			errors = append(errors, bulkIngestError{
+				Index: i,
+				Error: "document_id is required",
+			})
+			errorsMu.Unlock()
+			atomic.AddInt64(&failed, 1)
+			continue
+		}
+
+		// Extract routing if present
+		var routing map[string]string
+		routingVal := doc.Get("routing")
+		if routingVal.Exists() && routingVal.IsObject() {
+			routing = make(map[string]string)
+			routingVal.ForEach(func(key, value gjson.Result) bool {
+				routing[key.String()] = value.String()
+				return true
+			})
+		}
+
+		// Get payload as raw JSON bytes
+		payloadVal := doc.Get("payload")
+		var payload json.RawMessage
+		if payloadVal.Exists() {
+			payload = json.RawMessage(payloadVal.Raw)
+		} else {
+			payload = json.RawMessage("{}")
+		}
+
+		wg.Add(1)
+		go func(idx int, documentID string, routing map[string]string, payload json.RawMessage) {
+			defer wg.Done()
+
+			semaphore <- struct{}{}        // Acquire
+			defer func() { <-semaphore }() // Release
+
+			ingestReq := documents.Request{
+				IndexID:    indexID,
+				DocumentID: documentID,
+				Routing:    routing,
+				Payload:    payload,
+			}
+
+			if err := h.coord.IngestDocument(ctx, ingestReq); err != nil {
+				errorsMu.Lock()
+				errors = append(errors, bulkIngestError{
+					Index:      idx,
+					DocumentID: documentID,
+					Error:      err.Error(),
+				})
+				errorsMu.Unlock()
+				atomic.AddInt64(&failed, 1)
+				return
+			}
+
+			atomic.AddInt64(&indexed, 1)
+		}(i, docID, routing, payload)
+	}
+
+	wg.Wait()
+
+	// Flush the batcher to ensure all documents are sent
+	if batcher := h.coord.DocumentBatcher(); batcher != nil {
+		batcher.Flush()
+	}
+
+	response := bulkIngestResponse{
+		Indexed: int(indexed),
+		Failed:  int(failed),
+		Errors:  errors,
+	}
+
+	clusterhttputil.WriteJSON(w, http.StatusOK, response)
+}
+
 func (h *handler) handleListIndexes(w http.ResponseWriter, r *http.Request) {
 	ctx, span := tracer.Start(r.Context(), "cluster.listIndexes")
 	defer span.End()
@@ -333,6 +502,33 @@ func (h *handler) handleGetIndex(w http.ResponseWriter, r *http.Request) {
 	clusterhttputil.WriteJSON(w, http.StatusOK, toIndexResponse(definition))
 }
 
+func (h *handler) handleDeleteIndex(w http.ResponseWriter, r *http.Request) {
+	ctx, span := tracer.Start(r.Context(), "cluster.deleteIndex")
+	defer span.End()
+
+	indexID := chi.URLParam(r, "id")
+	if strings.TrimSpace(indexID) == "" {
+		http.Error(w, "missing index id in path", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.coord.DeleteIndex(ctx, indexID); err != nil {
+		// Check for Raft not-leader error first
+		if clusterhttputil.HandleNotLeaderError(w, err) {
+			return
+		}
+
+		if errors.Is(err, indexes.ErrIndexNotFound) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, "failed to delete index", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 type indexResponse struct {
 	ID               string                 `json:"id"`
 	Name             string                 `json:"name"`
@@ -342,6 +538,7 @@ type indexResponse struct {
 	DefaultAnalyzer  string                 `json:"default_analyzer"`
 	DefaultTokenizer string                 `json:"default_tokenizer"`
 	MappingVersion   int                    `json:"mapping_version"`
+	RefreshTime      string                 `json:"refresh_time,omitempty"` // e.g., "1s", "500ms"
 	FieldMappings    []fieldMappingResponse `json:"field_mappings"`
 	CreatedAt        time.Time              `json:"created_at"`
 	UpdatedAt        time.Time              `json:"updated_at"`
@@ -384,6 +581,11 @@ type computedComponentResponse struct {
 }
 
 func toIndexResponse(def indexes.IndexDefinition) indexResponse {
+	refreshTimeStr := ""
+	if def.RefreshTime > 0 {
+		refreshTimeStr = def.RefreshTime.String()
+	}
+
 	resp := indexResponse{
 		ID:               def.ID,
 		Name:             def.Name,
@@ -393,6 +595,7 @@ func toIndexResponse(def indexes.IndexDefinition) indexResponse {
 		DefaultAnalyzer:  def.DefaultAnalyzer,
 		DefaultTokenizer: def.DefaultTokenizer,
 		MappingVersion:   def.MappingVersion,
+		RefreshTime:      refreshTimeStr,
 		CreatedAt:        def.CreatedAt,
 		UpdatedAt:        def.UpdatedAt,
 		FieldMappings:    make([]fieldMappingResponse, 0, len(def.FieldMappings)),

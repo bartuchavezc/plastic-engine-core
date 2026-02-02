@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tidwall/gjson"
+
 	indexes "plastic-engine-core/internal/core/cluster/indexes"
 )
 
@@ -117,32 +119,27 @@ func extractTopLevelString(payload json.RawMessage, field string) (string, bool,
 		return "", false, nil
 	}
 
-	var holder map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &holder); err != nil {
-		return "", false, fmt.Errorf("decode document payload: %w", err)
-	}
-
-	raw, ok := holder[field]
-	if !ok {
+	result := gjson.GetBytes(payload, field)
+	if !result.Exists() {
 		return "", false, nil
 	}
 
-	var generic any
-	if err := json.Unmarshal(raw, &generic); err != nil {
-		return "", true, fmt.Errorf("decode field %s: %w", field, err)
-	}
-
-	switch v := generic.(type) {
-	case string:
-		return strings.TrimSpace(v), true, nil
-	case float64:
-		return strconv.FormatFloat(v, 'f', -1, 64), true, nil
-	case bool:
-		return strconv.FormatBool(v), true, nil
-	case nil:
+	// gjson handles type conversion automatically
+	switch result.Type {
+	case gjson.String:
+		return strings.TrimSpace(result.String()), true, nil
+	case gjson.Number:
+		// Preserve numeric precision
+		return result.Raw, true, nil
+	case gjson.True:
+		return "true", true, nil
+	case gjson.False:
+		return "false", true, nil
+	case gjson.Null:
 		return "", true, nil
 	default:
-		return strings.TrimSpace(string(raw)), true, nil
+		// For objects/arrays, return the raw JSON
+		return strings.TrimSpace(result.Raw), true, nil
 	}
 }
 

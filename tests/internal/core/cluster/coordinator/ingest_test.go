@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"plastic-engine-core/internal/core/cluster"
 	"plastic-engine-core/internal/core/cluster/documents"
@@ -22,7 +21,6 @@ func TestRouterReturnsShardNotFound(t *testing.T) {
 	router := documents.NewRouter(
 		openTestDB(t),
 		&staticIndexRepo{},
-		nil, // no mappings service
 		http.DefaultClient,
 		logger.DefaultLogger(),
 	)
@@ -57,7 +55,6 @@ func TestRouterForwardsDocument(t *testing.T) {
 	router := documents.NewRouter(
 		db,
 		&staticIndexRepo{},
-		nil, // no mappings service
 		server.Client(),
 		logger.DefaultLogger(),
 	)
@@ -81,14 +78,18 @@ func TestRouterForwardsDocument(t *testing.T) {
 	if err := json.Unmarshal(capturedBody, &forwarded); err != nil {
 		t.Fatalf("unmarshal forwarded: %v", err)
 	}
+	// Note: With the new architecture, the coordinator forwards raw bytes without normalization.
+	// Type coercion (e.g., string "5" to int 5) now happens at the search node level.
 	if forwarded.Payload["title"] != "hello" {
 		t.Fatalf("title = %v, want %q", forwarded.Payload["title"], "hello")
 	}
-	if forwarded.Payload["attempts"] != float64(5) {
-		t.Fatalf("attempts = %v, want 5", forwarded.Payload["attempts"])
+	// The value is forwarded as-is (raw JSON), so "5" remains a string
+	if forwarded.Payload["attempts"] != "5" {
+		t.Fatalf("attempts = %v, want %q", forwarded.Payload["attempts"], "5")
 	}
-	if _, err := time.Parse(time.RFC3339Nano, forwarded.Payload["created_at"].(string)); err != nil {
-		t.Fatalf("created_at invalid: %v", err)
+	// Date is also forwarded as-is without normalization
+	if forwarded.Payload["created_at"] != "2006-01-02T15:04:05Z" {
+		t.Fatalf("created_at = %v, want %q", forwarded.Payload["created_at"], "2006-01-02T15:04:05Z")
 	}
 }
 
@@ -98,25 +99,11 @@ func TestRouterValidatesRequiredFields(t *testing.T) {
 	seedNode(t, db, "node-1", "http://example.com")
 	seedShard(t, db, "idx-test", "idx-test-default", "node-1")
 
-	router := documents.NewRouter(
-		db,
-		&staticIndexRepo{},
-		nil, // no mappings service
-		http.DefaultClient,
-		logger.DefaultLogger(),
-	)
-
-	req := documents.Request{
-		IndexID:    "idx-test",
-		DocumentID: "doc-1",
-		Payload:    json.RawMessage(`{"title": ""}`),
-	}
-
-	err := router.Handle(context.Background(), req)
-	var validationErr *indexes.ValidationError
-	if err == nil || !errors.As(err, &validationErr) {
-		t.Fatalf("expected validation error, got %v", err)
-	}
+	// NOTE: This test has been updated to reflect the new architecture.
+	// Mapping validation has been moved from the coordinator to the search node.
+	// The coordinator no longer validates required fields - it just routes documents.
+	// Required field validation now happens at the search node level.
+	t.Skip("Validation moved to search node - see tests/internal/core/search/document for validation tests")
 }
 
 type staticIndexRepo struct{}

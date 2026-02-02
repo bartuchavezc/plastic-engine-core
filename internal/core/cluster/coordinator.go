@@ -15,6 +15,7 @@ import (
 	"plastic-engine-core/internal/core/cluster/mappings"
 	"plastic-engine-core/internal/core/cluster/nodes"
 	"plastic-engine-core/internal/core/cluster/shards"
+	searchshards "plastic-engine-core/internal/core/search/shards"
 	"plastic-engine-core/internal/pkg/logger"
 )
 
@@ -31,6 +32,7 @@ type Coordinator struct {
 	indexRepo       *indexes.Repository
 	nodesSvc        *nodes.Service
 	shardsSvc       *shards.Service
+	shardsNotifier  *shards.Notifier
 	mappingsSvc     *mappings.Service
 	documentsRouter *documents.Router
 }
@@ -77,11 +79,20 @@ func NewCoordinatorWithConfig(cfg CoordinatorConfig) (*Coordinator, error) {
 	}
 
 	indexRepo := indexes.NewRepository(db)
+	shardsRepo := shards.NewRepository(db)
 	shardsSvc := shards.NewService(db, log)
-	mappingsRepo := mappings.NewSQLiteRepository(db)
+	shardsNotifier := shards.NewNotifier(httpClient, shardsRepo, log)
+	mappingsRepo := mappings.NewCachedRepository(mappings.NewSQLiteRepository(db))
 	mappingsSvc := mappings.NewService(mappingsRepo)
 	nodesSvc := nodes.NewService(db, shardsSvc, indexRepo, log)
-	docRouter := documents.NewRouter(db, indexRepo, mappingsSvc, httpClient, log)
+	batcher := documents.NewDocumentBatcher(httpClient, documents.DefaultBatcherConfig(), log)
+	docRouter := documents.NewRouterWithConfig(documents.RouterConfig{
+		DB:         db,
+		IndexRepo:  indexRepo,
+		HTTPClient: httpClient,
+		Batcher:    batcher,
+		Logger:     log,
+	})
 
 	return &Coordinator{
 		Role:            cfg.Role,
@@ -92,6 +103,7 @@ func NewCoordinatorWithConfig(cfg CoordinatorConfig) (*Coordinator, error) {
 		indexRepo:       indexRepo,
 		nodesSvc:        nodesSvc,
 		shardsSvc:       shardsSvc,
+		shardsNotifier:  shardsNotifier,
 		mappingsSvc:     mappingsSvc,
 		documentsRouter: docRouter,
 	}, nil
@@ -115,11 +127,20 @@ func NewCoordinatorWithDeps(db *sql.DB, applier StateApplier, log logger.Logger)
 	}
 
 	indexRepo := indexes.NewRepository(db)
+	shardsRepo := shards.NewRepository(db)
 	shardsSvc := shards.NewService(db, log)
-	mappingsRepo := mappings.NewSQLiteRepository(db)
+	shardsNotifier := shards.NewNotifier(httpClient, shardsRepo, log)
+	mappingsRepo := mappings.NewCachedRepository(mappings.NewSQLiteRepository(db))
 	mappingsSvc := mappings.NewService(mappingsRepo)
 	nodesSvc := nodes.NewService(db, shardsSvc, indexRepo, log)
-	docRouter := documents.NewRouter(db, indexRepo, mappingsSvc, httpClient, log)
+	batcher := documents.NewDocumentBatcher(httpClient, documents.DefaultBatcherConfig(), log)
+	docRouter := documents.NewRouterWithConfig(documents.RouterConfig{
+		DB:         db,
+		IndexRepo:  indexRepo,
+		HTTPClient: httpClient,
+		Batcher:    batcher,
+		Logger:     log,
+	})
 
 	return &Coordinator{
 		db:              db,
@@ -128,6 +149,7 @@ func NewCoordinatorWithDeps(db *sql.DB, applier StateApplier, log logger.Logger)
 		indexRepo:       indexRepo,
 		nodesSvc:        nodesSvc,
 		shardsSvc:       shardsSvc,
+		shardsNotifier:  shardsNotifier,
 		mappingsSvc:     mappingsSvc,
 		documentsRouter: docRouter,
 	}, nil
@@ -185,6 +207,14 @@ func (c *Coordinator) ShardsService() *shards.Service {
 // MappingsService returns the mappings service for external use.
 func (c *Coordinator) MappingsService() *mappings.Service {
 	return c.mappingsSvc
+}
+
+// DocumentBatcher returns the document batcher for bulk operations.
+func (c *Coordinator) DocumentBatcher() *documents.DocumentBatcher {
+	if c == nil || c.documentsRouter == nil {
+		return nil
+	}
+	return c.documentsRouter.Batcher
 }
 
 // GetMapping retrieves the mapping for an index.
@@ -245,6 +275,7 @@ func (c *Coordinator) CreateIndex(ctx context.Context, req indexes.CreateIndexRe
 		DefaultTokenizer: req.DefaultTokenizer,
 		MappingVersion:   req.MappingVersion,
 		FieldMappings:    fieldMappingsJSON,
+		RefreshTime:      req.RefreshTime,
 		CreatedAt:        time.Now().UTC(),
 	}
 
@@ -312,6 +343,61 @@ func (c *Coordinator) GetIndex(ctx context.Context, id string) (indexes.IndexDef
 	}
 
 	return def, nil
+}
+
+// DeleteIndex removes an index and its associated shards from the cluster.
+// It notifies affected search nodes to unload the index.
+func (c *Coordinator) DeleteIndex(ctx context.Context, id string) error {
+	ctx, span := otel.Tracer("cluster.index").Start(ctx, "Coordinator.DeleteIndex")
+	defer span.End()
+
+	if c == nil || c.applier == nil {
+		return errors.New("coordinator not initialised")
+	}
+
+	// Verify the index exists
+	_, err := c.indexRepo.GetIndex(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	// Get nodes that have shards for this index before deleting
+	var affectedNodes []string
+	if c.shardsNotifier != nil {
+		affectedNodes, err = c.shardsNotifier.GetNodesWithShardsForIndex(ctx, id)
+		if err != nil {
+			c.log.Error("failed to get nodes with shards",
+				logger.Field{Key: "index_id", Value: id},
+				logger.Field{Key: "error", Value: err},
+			)
+			// Continue with deletion, nodes will detect on next heartbeat
+		}
+	}
+
+	// Create and apply the delete command
+	cmd, err := NewCommand(CmdDeleteIndex, DeleteIndexPayload{ID: id})
+	if err != nil {
+		return err
+	}
+
+	if err := c.applier.Apply(ctx, cmd); err != nil {
+		c.log.Error("delete index failed",
+			logger.Field{Key: "error", Value: err},
+			logger.Field{Key: "index_id", Value: id},
+		)
+		return err
+	}
+
+	c.log.Info("index deleted", logger.Field{Key: "index_id", Value: id})
+
+	// Notify affected search nodes
+	if c.shardsNotifier != nil {
+		for _, nodeID := range affectedNodes {
+			_ = c.shardsNotifier.NotifyIndexDeleted(ctx, nodeID, id)
+		}
+	}
+
+	return nil
 }
 
 // StartHealthMonitor delegates to the nodes service health monitor.
@@ -383,8 +469,60 @@ func (c *Coordinator) assignPendingShardsToReadyNodes(ctx context.Context) error
 				logger.Field{Key: "node_id", Value: node.ID},
 				logger.Field{Key: "count", Value: len(assignments)},
 			)
+
+			// Enrich assignments with index metadata before notifying
+			enrichedAssignments, err := c.enrichAssignments(ctx, assignments)
+			if err != nil {
+				c.log.Error("failed to enrich assignments for notification",
+					logger.Field{Key: "node_id", Value: node.ID},
+					logger.Field{Key: "error", Value: err},
+				)
+				continue
+			}
+
+			// Push assignments to the search node
+			if c.shardsNotifier != nil {
+				_ = c.shardsNotifier.NotifyNode(ctx, node.ID, enrichedAssignments)
+			}
 		}
 	}
 
 	return nil
+}
+
+// enrichAssignments adds index metadata to shard assignments.
+func (c *Coordinator) enrichAssignments(ctx context.Context, assignments []searchshards.Assignment) ([]searchshards.Assignment, error) {
+	if len(assignments) == 0 {
+		return assignments, nil
+	}
+
+	if c.indexRepo == nil {
+		return nil, errors.New("index repository not available")
+	}
+
+	cache := make(map[string]indexes.IndexDefinition)
+
+	for i := range assignments {
+		assignment := &assignments[i]
+
+		def, ok := cache[assignment.IndexID]
+		if !ok {
+			var err error
+			def, err = c.indexRepo.GetIndex(ctx, assignment.IndexID)
+			if err != nil {
+				return nil, err
+			}
+			cache[assignment.IndexID] = def
+		}
+
+		assignment.Analyzer = def.DefaultAnalyzer
+		assignment.Tokenizer = def.DefaultTokenizer
+		assignment.MappingVersion = def.MappingVersion
+		if len(def.FieldMappings) > 0 {
+			assignment.Fields = append([]indexes.FieldMapping(nil), def.FieldMappings...)
+		}
+		assignment.ShardStrategy = def.ShardStrategy
+	}
+
+	return assignments, nil
 }

@@ -73,6 +73,18 @@ func New(info NodeInfo, joinAddr string, client ClusterClient, manager *shards.M
 	}
 }
 
+// NewWithMappingRefresher creates a SearchNode with mapping refresh capability.
+func NewWithMappingRefresher(info NodeInfo, joinAddr string, client ClusterClient, manager *shards.Manager, mappingRefresher MappingRefresher, logger logger.Logger) *SearchNode {
+	return &SearchNode{
+		Info:             info,
+		JoinAddress:      joinAddr,
+		ClusterClient:    client,
+		ShardManager:     manager,
+		MappingRefresher: mappingRefresher,
+		Logger:           logger,
+	}
+}
+
 // Initialize performs the join flow and syncs assigned shards.
 func (n *SearchNode) Initialize() error {
 	ctx := context.Background()

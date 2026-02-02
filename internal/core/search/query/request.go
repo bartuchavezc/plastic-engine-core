@@ -15,11 +15,12 @@ const (
 
 // Request describes the payload accepted by the search cluster.
 type Request struct {
-	IndexID string   `json:"index_id"`
-	Query   Clause   `json:"query"`
-	Filters []Clause `json:"filters,omitempty"`
-	Limit   int      `json:"limit,omitempty"`
-	Cursor  string   `json:"cursor,omitempty"`
+	IndexID  string   `json:"index_id,omitempty"`
+	ShardIDs []string `json:"shard_ids,omitempty"`
+	Query    Clause   `json:"query"`
+	Filters  []Clause `json:"filters,omitempty"`
+	Limit    int      `json:"limit,omitempty"`
+	Cursor   string   `json:"cursor,omitempty"`
 }
 
 // ValidationError indicates the payload failed semantic validation.
@@ -98,10 +99,17 @@ func (r *Request) Normalize() error {
 
 // Validate ensures the request contains a coherent query definition.
 func (r Request) Validate() error {
-	if r.IndexID == "" {
+	if r.IndexID == "" && len(r.ShardIDs) == 0 {
 		return &ValidationError{
-			Field:   "index_id",
-			Message: "index_id is required",
+			Field:   "index_id or shard_ids",
+			Message: "either index_id or shard_ids must be provided",
+		}
+	}
+
+	if r.IndexID != "" && len(r.ShardIDs) > 0 {
+		return &ValidationError{
+			Field:   "index_id and shard_ids",
+			Message: "cannot specify both index_id and shard_ids",
 		}
 	}
 

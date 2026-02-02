@@ -16,7 +16,8 @@ type AnalyzerFactory struct{}
 // NewAnalyzer builds an analyzer by identifier.
 func (f AnalyzerFactory) NewAnalyzer(name string) (Analyzer, error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "", "simple":
+	case "", "simple", "standard":
+		// "standard" maps to simple for now; can be replaced with a proper standard analyzer later
 		return SimpleAnalyzer{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported analyzer %q", name)
