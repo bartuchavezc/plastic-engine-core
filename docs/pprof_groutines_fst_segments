@@ -1,0 +1,220 @@
+goroutine profile: total 244
+96 @ 0x47be6e 0x4592b7 0xd511d0 0x483f01
+#	0xd511cf	plastic-engine-core/internal/core/search/document.(*ShardWorker).loop+0x12f	/app/internal/core/search/document/worker.go:134
+
+32 @ 0x47be6e 0x4592b7 0x7b4cbb 0x483f01
+#	0x7b4cba	plastic-engine-core/internal/core/search/segment.(*Manager).mergeWorker+0xfa	/app/internal/core/search/segment/manager.go:245
+
+32 @ 0x47be6e 0x4592b7 0x7b4f06 0x483f01
+#	0x7b4f05	plastic-engine-core/internal/core/search/segment.(*Manager).syncWorker+0x105	/app/internal/core/search/segment/manager.go:264
+
+28 @ 0x47be6e 0x4592b7 0x7b4a7b 0x483f01
+#	0x7b4a7a	plastic-engine-core/internal/core/search/segment.(*Manager).flushWorker+0xfa	/app/internal/core/search/segment/manager.go:226
+
+20 @ 0x47be6e 0x4592b7 0xd5137b 0x483f01
+#	0xd5137a	plastic-engine-core/internal/core/search/document.(*ShardWorker).flushLoop+0xfa	/app/internal/core/search/document/worker.go:158
+
+6 @ 0x47be6e 0x4592b7 0xbee98c 0x483f01
+#	0xbee98b	google.golang.org/grpc/internal/grpcsync.(*CallbackSerializer).run+0x10b	/go/pkg/mod/google.golang.org/grpc@v1.75.0/internal/grpcsync/callback_serializer.go:88
+
+2 @ 0x47be6e 0x43f457 0x47b085 0x4f9267 0x4fa55a 0x4fa548 0x5adb25 0x5bd5c5 0x670077 0x4efc11 0xc028a5 0xc02873 0xc02fdd 0xc26db2 0x483f01
+#	0x47b084	internal/poll.runtime_pollWait+0x84					/usr/local/go/src/runtime/netpoll.go:351
+#	0x4f9266	internal/poll.(*pollDesc).wait+0x26					/usr/local/go/src/internal/poll/fd_poll_runtime.go:84
+#	0x4fa559	internal/poll.(*pollDesc).waitRead+0x279				/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
+#	0x4fa547	internal/poll.(*FD).Read+0x267						/usr/local/go/src/internal/poll/fd_unix.go:165
+#	0x5adb24	net.(*netFD).Read+0x24							/usr/local/go/src/net/fd_posix.go:55
+#	0x5bd5c4	net.(*conn).Read+0x44							/usr/local/go/src/net/net.go:194
+#	0x670076	bufio.(*Reader).Read+0x196						/usr/local/go/src/bufio/bufio.go:245
+#	0x4efc10	io.ReadAtLeast+0x90							/usr/local/go/src/io/io.go:335
+#	0xc028a4	io.ReadFull+0x64							/usr/local/go/src/io/io.go:354
+#	0xc02872	golang.org/x/net/http2.readFrameHeader+0x32				/go/pkg/mod/golang.org/x/net@v0.43.0/http2/frame.go:242
+#	0xc02fdc	golang.org/x/net/http2.(*Framer).ReadFrame+0x7c				/go/pkg/mod/golang.org/x/net@v0.43.0/http2/frame.go:506
+#	0xc26db1	google.golang.org/grpc/internal/transport.(*http2Client).reader+0x1d1	/go/pkg/mod/google.golang.org/grpc@v1.75.0/internal/transport/http2_client.go:1656
+
+2 @ 0x47be6e 0x4592b7 0xc124c8 0xc12c98 0xc1cb52 0x483f01
+#	0xc124c7	google.golang.org/grpc/internal/transport.(*controlBuffer).get+0x107	/go/pkg/mod/google.golang.org/grpc@v1.75.0/internal/transport/controlbuf.go:425
+#	0xc12c97	google.golang.org/grpc/internal/transport.(*loopyWriter).run+0x77	/go/pkg/mod/google.golang.org/grpc@v1.75.0/internal/transport/controlbuf.go:590
+#	0xc1cb51	google.golang.org/grpc/internal/transport.NewHTTP2Client.func6+0xd1	/go/pkg/mod/google.golang.org/grpc@v1.75.0/internal/transport/http2_client.go:469
+
+2 @ 0x47be6e 0x4592b7 0xc3ff6b 0x483f01
+#	0xc3ff6a	google.golang.org/grpc/internal/resolver/dns.(*dnsResolver).watcher+0x24a	/go/pkg/mod/google.golang.org/grpc@v1.75.0/internal/resolver/dns/dns_resolver.go:221
+
+2 @ 0x49d665 0x49bbbb 0x4fc654 0x4fc64c 0x4fc46c 0x5050ce 0x5050c9 0x671655 0x67190d 0x7a7dc6 0x7a8065 0x7b51f8 0x7b565a 0xd4ca7b 0xd4cf4e 0xd537fa 0xd51af7 0xd515f6 0xd51398 0x483f01
+#	0x49d664	syscall.Syscall+0x24										/usr/local/go/src/syscall/syscall_linux.go:73
+#	0x49bbba	syscall.write+0x3a										/usr/local/go/src/syscall/zsyscall_linux_amd64.go:964
+#	0x4fc653	syscall.Write+0x393										/usr/local/go/src/syscall/syscall_unix.go:211
+#	0x4fc64b	internal/poll.ignoringEINTRIO+0x38b								/usr/local/go/src/internal/poll/fd_unix.go:745
+#	0x4fc46b	internal/poll.(*FD).Write+0x1ab									/usr/local/go/src/internal/poll/fd_unix.go:381
+#	0x5050cd	os.(*File).write+0x4d										/usr/local/go/src/os/file_posix.go:46
+#	0x5050c8	os.(*File).Write+0x48										/usr/local/go/src/os/file.go:195
+#	0x671654	bufio.(*Writer).Flush+0x54									/usr/local/go/src/bufio/bufio.go:643
+#	0x67190c	bufio.(*Writer).Write+0xcc									/usr/local/go/src/bufio/bufio.go:687
+#	0x7a7dc5	plastic-engine-core/internal/core/search/wal.(*WAL).Append+0x3a5				/app/internal/core/search/wal/wal.go:151
+#	0x7a8064	plastic-engine-core/internal/core/search/wal.(*WAL).AppendIndex+0xa4				/app/internal/core/search/wal/wal.go:170
+#	0x7b51f7	plastic-engine-core/internal/core/search/segment.(*Manager).Index+0x1d7				/app/internal/core/search/segment/manager.go:287
+#	0x7b5659	plastic-engine-core/internal/core/search/segment.(*Manager).IndexDocument+0x279			/app/internal/core/search/segment/manager.go:327
+#	0xd4ca7a	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).Index+0x33a		/app/internal/core/search/document/segment_writer.go:81
+#	0xd4cf4d	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).IndexBatch+0x1ad	/app/internal/core/search/document/segment_writer.go:95
+#	0xd537f9	plastic-engine-core/internal/core/search/document.(*ShardWorker).processBatch+0x6f9		/app/internal/core/search/document/worker.go:384
+#	0xd51af6	plastic-engine-core/internal/core/search/document.(*ShardWorker).processSwappedBatch+0x4d6	/app/internal/core/search/document/worker.go:210
+#	0xd515f5	plastic-engine-core/internal/core/search/document.(*ShardWorker).doFlush+0x115			/app/internal/core/search/document/worker.go:183
+#	0xd51397	plastic-engine-core/internal/core/search/document.(*ShardWorker).flushLoop+0x117		/app/internal/core/search/document/worker.go:162
+
+2 @ 0x7baa32 0x7accec 0x7b6190 0x7b4aa7 0x483f01
+#	0x7baa31	plastic-engine-core/internal/core/search/segment.(*memSegmentIterator).Postings+0xd1	/app/internal/core/search/segment/mem_segment.go:229
+#	0x7acceb	plastic-engine-core/internal/core/search/segment.FlushMemSegment+0x24b			/app/internal/core/search/segment/disk_segment.go:540
+#	0x7b618f	plastic-engine-core/internal/core/search/segment.(*Manager).doFlush+0x1ef		/app/internal/core/search/segment/manager.go:439
+#	0x7b4aa6	plastic-engine-core/internal/core/search/segment.(*Manager).flushWorker+0x126		/app/internal/core/search/segment/manager.go:232
+
+1 @ 0x40a347 0x40bc91 0x40bbf0 0x40de77 0x7b1f91 0x483f01
+#	0x7b1f90	plastic-engine-core/internal/core/search/segment.(*FSTTermRegistry).Rebuild+0x350	/app/internal/core/search/segment/fst_registry.go:806
+
+1 @ 0x40ae8e 0x40bdd1 0x40bbf0 0x40de77 0x7b9511 0x7b529e 0x7b565a 0xd4ca7b 0xd4cf4e 0xd537fa 0xd51af7 0xd515f6 0xd51398 0x483f01
+#	0x7b9510	plastic-engine-core/internal/core/search/segment.(*MemSegment).Add+0x190			/app/internal/core/search/segment/mem_segment.go:78
+#	0x7b529d	plastic-engine-core/internal/core/search/segment.(*Manager).Index+0x27d				/app/internal/core/search/segment/manager.go:300
+#	0x7b5659	plastic-engine-core/internal/core/search/segment.(*Manager).IndexDocument+0x279			/app/internal/core/search/segment/manager.go:327
+#	0xd4ca7a	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).Index+0x33a		/app/internal/core/search/document/segment_writer.go:81
+#	0xd4cf4d	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).IndexBatch+0x1ad	/app/internal/core/search/document/segment_writer.go:95
+#	0xd537f9	plastic-engine-core/internal/core/search/document.(*ShardWorker).processBatch+0x6f9		/app/internal/core/search/document/worker.go:384
+#	0xd51af6	plastic-engine-core/internal/core/search/document.(*ShardWorker).processSwappedBatch+0x4d6	/app/internal/core/search/document/worker.go:210
+#	0xd515f5	plastic-engine-core/internal/core/search/document.(*ShardWorker).doFlush+0x115			/app/internal/core/search/document/worker.go:183
+#	0xd51397	plastic-engine-core/internal/core/search/document.(*ShardWorker).flushLoop+0x117		/app/internal/core/search/document/worker.go:162
+
+1 @ 0x40e1e7 0x7b96ed 0x7b529e 0x7b565a 0xd4ca7b 0xd4cf4e 0xd537fa 0xd51af7 0xd515f6 0xd51398 0x483f01
+#	0x7b96ec	plastic-engine-core/internal/core/search/segment.(*MemSegment).Add+0x36c			/app/internal/core/search/segment/mem_segment.go:98
+#	0x7b529d	plastic-engine-core/internal/core/search/segment.(*Manager).Index+0x27d				/app/internal/core/search/segment/manager.go:300
+#	0x7b5659	plastic-engine-core/internal/core/search/segment.(*Manager).IndexDocument+0x279			/app/internal/core/search/segment/manager.go:327
+#	0xd4ca7a	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).Index+0x33a		/app/internal/core/search/document/segment_writer.go:81
+#	0xd4cf4d	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).IndexBatch+0x1ad	/app/internal/core/search/document/segment_writer.go:95
+#	0xd537f9	plastic-engine-core/internal/core/search/document.(*ShardWorker).processBatch+0x6f9		/app/internal/core/search/document/worker.go:384
+#	0xd51af6	plastic-engine-core/internal/core/search/document.(*ShardWorker).processSwappedBatch+0x4d6	/app/internal/core/search/document/worker.go:210
+#	0xd515f5	plastic-engine-core/internal/core/search/document.(*ShardWorker).doFlush+0x115			/app/internal/core/search/document/worker.go:183
+#	0xd51397	plastic-engine-core/internal/core/search/document.(*ShardWorker).flushLoop+0x117		/app/internal/core/search/document/worker.go:162
+
+1 @ 0x419489 0x47de49 0x776253 0x483f01
+#	0x47de48	os/signal.signal_recv+0x28	/usr/local/go/src/runtime/sigqueue.go:152
+#	0x776252	os/signal.loop+0x12		/usr/local/go/src/os/signal/signal_unix.go:23
+
+1 @ 0x41beb5 0x7a1c52 0x7a1c45 0x7a1265 0x7b245e 0x483f01
+#	0x7a1c51	github.com/blevesearch/vellum.(*unfinishedNodes).get+0xf1				/go/pkg/mod/github.com/blevesearch/vellum@v1.2.0/builder.go:213
+#	0x7a1c44	github.com/blevesearch/vellum.(*unfinishedNodes).addSuffix+0xe4				/go/pkg/mod/github.com/blevesearch/vellum@v1.2.0/builder.go:308
+#	0x7a1264	github.com/blevesearch/vellum.(*Builder).Insert+0x244					/go/pkg/mod/github.com/blevesearch/vellum@v1.2.0/builder.go:109
+#	0x7b245d	plastic-engine-core/internal/core/search/segment.(*FSTTermRegistry).Rebuild+0x81d	/app/internal/core/search/segment/fst_registry.go:839
+
+1 @ 0x43bb71 0x47ac7d 0x757f71 0x757da5 0x754bcb 0x76f7ef 0x779edc 0x6f2029 0xd641b9 0x6f2029 0xd65837 0x6f2029 0xd650be 0x6f2029 0x77790e 0x712ace 0x6f0525 0x483f01
+#	0x757f70	runtime/pprof.writeRuntimeProfile+0xb0							/usr/local/go/src/runtime/pprof/pprof.go:796
+#	0x757da4	runtime/pprof.writeGoroutine+0x44							/usr/local/go/src/runtime/pprof/pprof.go:755
+#	0x754bca	runtime/pprof.(*Profile).WriteTo+0x14a							/usr/local/go/src/runtime/pprof/pprof.go:377
+#	0x76f7ee	net/http/pprof.handler.ServeHTTP+0x52e							/usr/local/go/src/net/http/pprof/pprof.go:272
+#	0x779edb	github.com/go-chi/chi/v5.(*Mux).routeHTTP+0x31b						/go/pkg/mod/github.com/go-chi/chi/v5@v5.2.3/mux.go:477
+#	0x6f2028	net/http.HandlerFunc.ServeHTTP+0x28							/usr/local/go/src/net/http/server.go:2294
+#	0xd641b8	plastic-engine-core/internal/adapters/telemetry/middleware.Observability.func1.1+0xc78	/app/internal/adapters/telemetry/middleware/http.go:103
+#	0x6f2028	net/http.HandlerFunc.ServeHTTP+0x28							/usr/local/go/src/net/http/server.go:2294
+#	0xd65836	plastic-engine-core/internal/adapters/telemetry/middleware.RequestID.func1+0x376	/app/internal/adapters/telemetry/middleware/http.go:247
+#	0x6f2028	net/http.HandlerFunc.ServeHTTP+0x28							/usr/local/go/src/net/http/server.go:2294
+#	0xd650bd	plastic-engine-core/internal/adapters/telemetry/middleware.Recovery.func1.1+0x7d	/app/internal/adapters/telemetry/middleware/http.go:224
+#	0x6f2028	net/http.HandlerFunc.ServeHTTP+0x28							/usr/local/go/src/net/http/server.go:2294
+#	0x77790d	github.com/go-chi/chi/v5.(*Mux).ServeHTTP+0x2ed						/go/pkg/mod/github.com/go-chi/chi/v5@v5.2.3/mux.go:90
+#	0x712acd	net/http.serverHandler.ServeHTTP+0x8d							/usr/local/go/src/net/http/server.go:3301
+#	0x6f0524	net/http.(*conn).serve+0x624								/usr/local/go/src/net/http/server.go:2102
+
+1 @ 0x445579 0x4854bb 0x7a6bdc 0x7a6ae5 0x7a1645 0x7a14d5 0x7a111c 0x7b245e 0x483f01
+#	0x7a6bdb	github.com/blevesearch/vellum.registryCache.entry+0x9b					/go/pkg/mod/github.com/blevesearch/vellum@v1.2.0/builder.go:369
+#	0x7a6ae4	github.com/blevesearch/vellum.(*registry).entry+0xe4					/go/pkg/mod/github.com/blevesearch/vellum@v1.2.0/registry.go:56
+#	0x7a1644	github.com/blevesearch/vellum.(*Builder).compile+0x44					/go/pkg/mod/github.com/blevesearch/vellum@v1.2.0/builder.go:161
+#	0x7a14d4	github.com/blevesearch/vellum.(*Builder).compileFrom+0xd4				/go/pkg/mod/github.com/blevesearch/vellum@v1.2.0/builder.go:147
+#	0x7a111b	github.com/blevesearch/vellum.(*Builder).Insert+0xfb					/go/pkg/mod/github.com/blevesearch/vellum@v1.2.0/builder.go:104
+#	0x7b245d	plastic-engine-core/internal/core/search/segment.(*FSTTermRegistry).Rebuild+0x81d	/app/internal/core/search/segment/fst_registry.go:839
+
+1 @ 0x47be6e 0x43f457 0x47b085 0x4f9267 0x4fa55a 0x4fa548 0x5adb25 0x5bd5c5 0x70ba87 0x66fb43 0x66fc73 0x70c592 0x483f01
+#	0x47b084	internal/poll.runtime_pollWait+0x84		/usr/local/go/src/runtime/netpoll.go:351
+#	0x4f9266	internal/poll.(*pollDesc).wait+0x26		/usr/local/go/src/internal/poll/fd_poll_runtime.go:84
+#	0x4fa559	internal/poll.(*pollDesc).waitRead+0x279	/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
+#	0x4fa547	internal/poll.(*FD).Read+0x267			/usr/local/go/src/internal/poll/fd_unix.go:165
+#	0x5adb24	net.(*netFD).Read+0x24				/usr/local/go/src/net/fd_posix.go:55
+#	0x5bd5c4	net.(*conn).Read+0x44				/usr/local/go/src/net/net.go:194
+#	0x70ba86	net/http.(*persistConn).Read+0x46		/usr/local/go/src/net/http/transport.go:2125
+#	0x66fb42	bufio.(*Reader).fill+0x102			/usr/local/go/src/bufio/bufio.go:113
+#	0x66fc72	bufio.(*Reader).Peek+0x52			/usr/local/go/src/bufio/bufio.go:152
+#	0x70c591	net/http.(*persistConn).readLoop+0x171		/usr/local/go/src/net/http/transport.go:2278
+
+1 @ 0x47be6e 0x43f457 0x47b085 0x4f9267 0x4fe635 0x4fe623 0x5afac9 0x5c653b 0x5c5730 0x6f5a0c 0x6f5611 0xd46979 0x483f01
+#	0x47b084	internal/poll.runtime_pollWait+0x84								/usr/local/go/src/runtime/netpoll.go:351
+#	0x4f9266	internal/poll.(*pollDesc).wait+0x26								/usr/local/go/src/internal/poll/fd_poll_runtime.go:84
+#	0x4fe634	internal/poll.(*pollDesc).waitRead+0x294							/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
+#	0x4fe622	internal/poll.(*FD).Accept+0x282								/usr/local/go/src/internal/poll/fd_unix.go:620
+#	0x5afac8	net.(*netFD).accept+0x28									/usr/local/go/src/net/fd_unix.go:172
+#	0x5c653a	net.(*TCPListener).accept+0x1a									/usr/local/go/src/net/tcpsock_posix.go:159
+#	0x5c572f	net.(*TCPListener).Accept+0x2f									/usr/local/go/src/net/tcpsock.go:380
+#	0x6f5a0b	net/http.(*Server).Serve+0x30b									/usr/local/go/src/net/http/server.go:3424
+#	0x6f5610	net/http.(*Server).ListenAndServe+0x70								/usr/local/go/src/net/http/server.go:3350
+#	0xd46978	plastic-engine-core/internal/adapters/telemetry/metrics.(*Provider).startPrometheusServer+0x218	/app/internal/adapters/telemetry/metrics/metrics.go:317
+
+1 @ 0x47be6e 0x43f457 0x47b085 0x4f9267 0x4fe635 0x4fe623 0x5afac9 0x5c653b 0x5c5730 0x6f5a0c 0x6f5611 0xd97fa5 0x483f01
+#	0x47b084	internal/poll.runtime_pollWait+0x84		/usr/local/go/src/runtime/netpoll.go:351
+#	0x4f9266	internal/poll.(*pollDesc).wait+0x26		/usr/local/go/src/internal/poll/fd_poll_runtime.go:84
+#	0x4fe634	internal/poll.(*pollDesc).waitRead+0x294	/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
+#	0x4fe622	internal/poll.(*FD).Accept+0x282		/usr/local/go/src/internal/poll/fd_unix.go:620
+#	0x5afac8	net.(*netFD).accept+0x28			/usr/local/go/src/net/fd_unix.go:172
+#	0x5c653a	net.(*TCPListener).accept+0x1a			/usr/local/go/src/net/tcpsock_posix.go:159
+#	0x5c572f	net.(*TCPListener).Accept+0x2f			/usr/local/go/src/net/tcpsock.go:380
+#	0x6f5a0b	net/http.(*Server).Serve+0x30b			/usr/local/go/src/net/http/server.go:3424
+#	0x6f5610	net/http.(*Server).ListenAndServe+0x70		/usr/local/go/src/net/http/server.go:3350
+#	0xd97fa4	main.main.func7+0x1c4				/app/cmd/search/main.go:224
+
+1 @ 0x47be6e 0x4592b7 0x70dea7 0x483f01
+#	0x70dea6	net/http.(*persistConn).writeLoop+0xe6	/usr/local/go/src/net/http/transport.go:2593
+
+1 @ 0x47be6e 0x4592b7 0x775de6 0x483f01
+#	0x775de5	os/signal.NotifyContext.func1+0x65	/usr/local/go/src/os/signal/signal.go:289
+
+1 @ 0x47be6e 0x4592b7 0xcda325 0xcda18f 0x483f01
+#	0xcda324	go.opentelemetry.io/otel/sdk/metric.(*PeriodicReader).run+0x124		/go/pkg/mod/go.opentelemetry.io/otel/sdk/metric@v1.38.0/periodic_reader.go:166
+#	0xcda18e	go.opentelemetry.io/otel/sdk/metric.NewPeriodicReader.func2+0x4e	/go/pkg/mod/go.opentelemetry.io/otel/sdk/metric@v1.38.0/periodic_reader.go:126
+
+1 @ 0x47be6e 0x4592b7 0xd718fa 0xd6f391 0x483f01
+#	0xd718f9	go.opentelemetry.io/otel/sdk/trace.(*batchSpanProcessor).processQueue+0x119	/go/pkg/mod/go.opentelemetry.io/otel/sdk@v1.38.0/trace/batch_span_processor.go:390
+#	0xd6f390	go.opentelemetry.io/otel/sdk/trace.NewBatchSpanProcessor.func2+0x50		/go/pkg/mod/go.opentelemetry.io/otel/sdk@v1.38.0/trace/batch_span_processor.go:145
+
+1 @ 0x47be6e 0x4592b7 0xd92ba5 0x483f01
+#	0xd92ba4	plastic-engine-core/internal/core/search.(*SearchNode).StartHeartbeat.func1+0xe4	/app/internal/core/search/node.go:130
+
+1 @ 0x47be6e 0x4592b7 0xd97a17 0x446a0b 0x483f01
+#	0xd97a16	main.main+0x19d6	/app/cmd/search/main.go:236
+#	0x446a0a	runtime.main+0x28a	/usr/local/go/src/runtime/proc.go:283
+
+1 @ 0x483f01
+
+1 @ 0x49d665 0x49b525 0x4f8a67 0x4f8a62 0x4f8a8e 0x50645b 0x7ac90e 0x7acdf1 0x7b6190 0x7b4aa7 0x483f01
+#	0x49d664	syscall.Syscall+0x24									/usr/local/go/src/syscall/syscall_linux.go:73
+#	0x49b524	syscall.Fsync+0x24									/usr/local/go/src/syscall/zsyscall_linux_amd64.go:463
+#	0x4f8a66	internal/poll.(*FD).Fsync.func1+0xe6							/usr/local/go/src/internal/poll/fd_fsync_posix.go:18
+#	0x4f8a61	internal/poll.ignoringEINTR+0xe1							/usr/local/go/src/internal/poll/fd_posix.go:74
+#	0x4f8a8d	internal/poll.(*FD).Fsync+0x10d								/usr/local/go/src/internal/poll/fd_fsync_posix.go:17
+#	0x50645a	os.(*File).Sync+0x3a									/usr/local/go/src/os/file_posix.go:166
+#	0x7ac90d	plastic-engine-core/internal/core/search/segment.(*DiskSegmentWriter).Finalize+0x7cd	/app/internal/core/search/segment/disk_segment.go:500
+#	0x7acdf0	plastic-engine-core/internal/core/search/segment.FlushMemSegment+0x350			/app/internal/core/search/segment/disk_segment.go:550
+#	0x7b618f	plastic-engine-core/internal/core/search/segment.(*Manager).doFlush+0x1ef		/app/internal/core/search/segment/manager.go:439
+#	0x7b4aa6	plastic-engine-core/internal/core/search/segment.(*Manager).flushWorker+0x126		/app/internal/core/search/segment/manager.go:232
+
+1 @ 0x4e0c5f 0x77fe7a 0x77f294 0x77eade 0x77e6d9 0x7aa7e5 0x7aa325 0x7ace85 0x7b6190 0x7b4aa7 0x483f01
+#	0x4e0c5e	reflect.Value.SetLen+0xfe								/usr/local/go/src/reflect/value.go:2156
+#	0x77fe79	encoding/json.(*decodeState).array+0x479						/usr/local/go/src/encoding/json/decode.go:550
+#	0x77f293	encoding/json.(*decodeState).value+0x73							/usr/local/go/src/encoding/json/decode.go:365
+#	0x77eadd	encoding/json.(*decodeState).unmarshal+0x11d						/usr/local/go/src/encoding/json/decode.go:178
+#	0x77e6d8	encoding/json.Unmarshal+0xf8								/usr/local/go/src/encoding/json/decode.go:108
+#	0x7aa7e4	plastic-engine-core/internal/core/search/segment.(*DiskSegment).loadHeader+0x444	/app/internal/core/search/segment/disk_segment.go:114
+#	0x7aa324	plastic-engine-core/internal/core/search/segment.OpenDiskSegment+0xe4			/app/internal/core/search/segment/disk_segment.go:60
+#	0x7ace84	plastic-engine-core/internal/core/search/segment.FlushMemSegment+0x3e4			/app/internal/core/search/segment/disk_segment.go:557
+#	0x7b618f	plastic-engine-core/internal/core/search/segment.(*Manager).doFlush+0x1ef		/app/internal/core/search/segment/manager.go:439
+#	0x7b4aa6	plastic-engine-core/internal/core/search/segment.(*Manager).flushWorker+0x126		/app/internal/core/search/segment/manager.go:232
+
+1 @ 0x57976e 0x579637 0x579637 0x579637 0x612125 0x6120f4 0x7b21c6 0x483f01
+#	0x57976d	slices.pdqsortOrdered[...]+0x4ad							/usr/local/go/src/slices/zsortordered.go:63
+#	0x579636	slices.pdqsortOrdered[...]+0x376							/usr/local/go/src/slices/zsortordered.go:127
+#	0x579636	slices.pdqsortOrdered[...]+0x376							/usr/local/go/src/slices/zsortordered.go:127
+#	0x579636	slices.pdqsortOrdered[...]+0x376							/usr/local/go/src/slices/zsortordered.go:127
+#	0x612124	slices.Sort[...]+0x44									/usr/local/go/src/slices/sort.go:18
+#	0x6120f3	sort.Strings+0x13									/usr/local/go/src/sort/sort.go:179
+#	0x7b21c5	plastic-engine-core/internal/core/search/segment.(*FSTTermRegistry).Rebuild+0x585	/app/internal/core/search/segment/fst_registry.go:822
+

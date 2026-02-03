@@ -120,6 +120,20 @@ type Config struct {
 
 	// DataDir is the directory for segment files.
 	DataDir string
+
+	// FSTRebuildThreshold is the number of pending terms before auto-rebuilding FST.
+	// Default: 1000
+	// Deprecated: Use TermRegistryMergeConfig instead.
+	FSTRebuildThreshold int
+
+	// TermRegistryMergeConfig configures the Pebble+FST hybrid term registry.
+	// If nil, DefaultMergeConfig() is used.
+	TermRegistryMergeConfig *MergeConfig
+
+	// TermRegistry is an optional external term registry to use.
+	// If provided, the Manager will use this registry instead of creating its own.
+	// This allows sharing a single registry across multiple shards (recommended).
+	TermRegistry TermRegistry
 }
 
 // DefaultConfig returns sensible defaults.
@@ -129,5 +143,6 @@ func DefaultConfig() Config {
 		MaxSegmentsPerLevel: 5,
 		LevelSizeMultiplier: 10,
 		DataDir:             "segments",
+		FSTRebuildThreshold: 1000,
 	}
 }

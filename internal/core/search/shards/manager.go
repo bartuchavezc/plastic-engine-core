@@ -12,6 +12,14 @@ import (
 	"plastic-engine-core/internal/core/search/segment"
 )
 
+// ManagerConfig holds configuration for the shard manager.
+type ManagerConfig struct {
+	RootDir string
+	// TermRegistryMergeConfig configures the global term registry.
+	// If nil, DefaultMergeConfig() is used.
+	TermRegistryMergeConfig *segment.MergeConfig
+}
+
 // Note: Migrated from pebble to segment-based storage
 
 // Assignment describes how a shard should look when assigned to this node.
@@ -36,16 +44,55 @@ type Manager struct {
 	mu     sync.RWMutex
 	shards map[string]*Shard
 
+	// Global term registry shared by all shards (reduces goroutines and memory)
+	globalRegistry segment.TermRegistry
+	registryOnce   sync.Once
+	registryErr    error
+	registryConfig *segment.MergeConfig
+
 	loadOnce sync.Once
 	loadErr  error
 }
 
 // NewManager builds a Manager rooted in the given directory.
 func NewManager(rootDir string) *Manager {
+	return NewManagerWithConfig(ManagerConfig{RootDir: rootDir})
+}
+
+// NewManagerWithConfig builds a Manager with the given configuration.
+func NewManagerWithConfig(config ManagerConfig) *Manager {
 	return &Manager{
-		rootDir: rootDir,
-		shards:  make(map[string]*Shard),
+		rootDir:        config.RootDir,
+		shards:         make(map[string]*Shard),
+		registryConfig: config.TermRegistryMergeConfig,
 	}
+}
+
+// ensureGlobalRegistry creates the global term registry if not already created.
+func (m *Manager) ensureGlobalRegistry() error {
+	m.registryOnce.Do(func() {
+		registryDir := filepath.Join(m.rootDir, "_global_registry")
+		if err := os.MkdirAll(registryDir, 0o755); err != nil {
+			m.registryErr = fmt.Errorf("create global registry dir: %w", err)
+			return
+		}
+
+		mergeConfig := segment.DefaultMergeConfig()
+		if m.registryConfig != nil {
+			mergeConfig = *m.registryConfig
+		}
+
+		registry, err := segment.NewPebbleFSTRegistry(segment.PebbleFSTConfig{
+			DataDir:     registryDir,
+			MergeConfig: mergeConfig,
+		})
+		if err != nil {
+			m.registryErr = fmt.Errorf("create global registry: %w", err)
+			return
+		}
+		m.globalRegistry = registry
+	})
+	return m.registryErr
 }
 
 // Sync ensures that every assigned shard is available locally.
@@ -67,6 +114,11 @@ func (m *Manager) Sync(assignments []Assignment) error {
 }
 
 func (m *Manager) ensureLocalShard(assignment Assignment) error {
+	// Ensure global registry exists
+	if err := m.ensureGlobalRegistry(); err != nil {
+		return err
+	}
+
 	if existing, ok := m.GetShard(assignment.ID); ok {
 		if err := writeManifest(m.shardPath(assignment.ID), assignment); err != nil {
 			return fmt.Errorf("update manifest for shard %s: %w", assignment.ID, err)
@@ -81,6 +133,7 @@ func (m *Manager) ensureLocalShard(assignment Assignment) error {
 				MaxSegmentsPerLevel: 5,
 				LevelSizeMultiplier: 10,
 				DataDir:             m.shardPath(assignment.ID),
+				TermRegistry:        m.globalRegistry, // Use shared registry
 			})
 			if err != nil {
 				m.mu.Unlock()
@@ -116,6 +169,7 @@ func (m *Manager) openShard(assignment Assignment) error {
 		MaxSegmentsPerLevel: 5,
 		LevelSizeMultiplier: 10,
 		DataDir:             shardPath,
+		TermRegistry:        m.globalRegistry, // Use shared registry
 	})
 	if err != nil {
 		return fmt.Errorf("open segment manager for shard %s: %w", assignment.ID, err)
@@ -157,6 +211,15 @@ func (m *Manager) Close() error {
 		}
 	}
 	m.shards = make(map[string]*Shard)
+
+	// Close global registry after all shards are closed
+	if m.globalRegistry != nil {
+		if err := m.globalRegistry.Close(); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("close global registry: %w", err)
+		}
+		m.globalRegistry = nil
+	}
+
 	return firstErr
 }
 
@@ -249,6 +312,11 @@ func (m *Manager) loadExistingShards() error {
 		return fmt.Errorf("create data dir %s: %w", m.rootDir, err)
 	}
 
+	// Initialize global registry first
+	if err := m.ensureGlobalRegistry(); err != nil {
+		return err
+	}
+
 	entries, err := os.ReadDir(m.rootDir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -262,6 +330,10 @@ func (m *Manager) loadExistingShards() error {
 			continue
 		}
 		id := entry.Name()
+		// Skip the global registry directory
+		if id == "_global_registry" {
+			continue
+		}
 		shardPath := m.shardPath(id)
 
 		assignment, err := readManifest(shardPath)
@@ -274,6 +346,7 @@ func (m *Manager) loadExistingShards() error {
 			MaxSegmentsPerLevel: 5,
 			LevelSizeMultiplier: 10,
 			DataDir:             shardPath,
+			TermRegistry:        m.globalRegistry, // Use shared registry
 		})
 		if err != nil {
 			return fmt.Errorf("open existing shard %s: %w", id, err)

@@ -15,7 +15,7 @@ type SegmentManager interface {
 	SearchByTermID(termID string) ([]segment.Hit, error)
 	GetDF(termID string) int64
 	GetTotalDocs() int64
-	Registry() *segment.MemTermRegistry
+	Registry() segment.TermRegistry
 }
 
 // SegmentExecutor executes queries against a segment-based shard.

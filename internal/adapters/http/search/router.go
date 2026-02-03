@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"plastic-engine-core/internal/core/search/document"
 	searchquery "plastic-engine-core/internal/core/search/query"
+	"plastic-engine-core/internal/core/search/segment"
 	"plastic-engine-core/internal/core/search/shards"
 	"plastic-engine-core/internal/pkg/logger"
 )
@@ -28,11 +30,24 @@ type ShardSyncer interface {
 	UnloadIndex(indexID string) error
 }
 
+// TermLookup provides term lookup operations for a shard.
+type TermLookup interface {
+	// ListTerms returns all terms for a shard, optionally filtered by field.
+	ListTerms(ctx context.Context, shardID, field string, limit, offset int) ([]segment.TermEntry, int64, error)
+	// ListTermsByPrefix returns terms matching a prefix.
+	ListTermsByPrefix(ctx context.Context, shardID, field, prefix string, limit int) ([]segment.TermEntry, error)
+	// ListTermsByFuzzy returns terms within Levenshtein distance.
+	ListTermsByFuzzy(ctx context.Context, shardID, field, query string, maxDistance, limit int) ([]segment.TermEntry, error)
+	// ListTermsByRegex returns terms matching a regex pattern.
+	ListTermsByRegex(ctx context.Context, shardID, field, pattern string, limit int) ([]segment.TermEntry, error)
+}
+
 // RouterConfig holds configuration for creating a Router.
 type RouterConfig struct {
 	Indexer     Indexer
 	Searcher    Searcher
 	ShardSyncer ShardSyncer
+	TermLookup  TermLookup
 	Logger      logger.Logger
 }
 
@@ -78,6 +93,11 @@ func NewRouterWithConfig(cfg RouterConfig) http.Handler {
 
 	mux.HandleFunc("/indexes/deleted", func(w http.ResponseWriter, r *http.Request) {
 		handleIndexDeleted(w, r, cfg.ShardSyncer, log)
+	})
+
+	// Term lookup APIs
+	mux.HandleFunc("/terms", func(w http.ResponseWriter, r *http.Request) {
+		handleTermLookup(w, r, cfg.TermLookup, log)
 	})
 
 	return mux
@@ -375,4 +395,154 @@ func handleIndexDeleted(w http.ResponseWriter, r *http.Request, syncer ShardSync
 	)
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// termLookupResponse is the response for term lookup APIs.
+type termLookupResponse struct {
+	Terms  []segment.TermEntry `json:"terms"`
+	Total  int64               `json:"total,omitempty"`
+	Limit  int                 `json:"limit"`
+	Offset int                 `json:"offset,omitempty"`
+}
+
+// handleTermLookup handles term lookup requests.
+// Query parameters:
+//   - shard_id (required): The shard to query
+//   - field (optional): Filter by field name
+//   - limit (optional): Max results (default: 100, max: 1000)
+//   - offset (optional): Pagination offset (default: 0)
+//   - prefix (optional): Prefix search
+//   - fuzzy (optional): Fuzzy search query
+//   - distance (optional): Max Levenshtein distance for fuzzy (default: 1, max: 3)
+//   - regex (optional): Regex pattern search
+func handleTermLookup(w http.ResponseWriter, r *http.Request, lookup TermLookup, log logger.Logger) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if lookup == nil {
+		http.Error(w, "term lookup unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	query := r.URL.Query()
+
+	// Required: shard_id
+	shardID := query.Get("shard_id")
+	if shardID == "" {
+		http.Error(w, "shard_id is required", http.StatusBadRequest)
+		return
+	}
+
+	// Optional parameters
+	field := query.Get("field")
+	prefix := query.Get("prefix")
+	fuzzy := query.Get("fuzzy")
+	regex := query.Get("regex")
+
+	// Parse limit (default: 100, max: 1000)
+	limit := 100
+	if limitStr := query.Get("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	// Parse offset (default: 0)
+	offset := 0
+	if offsetStr := query.Get("offset"); offsetStr != "" {
+		if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
+			offset = o
+		}
+	}
+
+	// Parse distance for fuzzy (default: 1, max: 3)
+	distance := 1
+	if distStr := query.Get("distance"); distStr != "" {
+		if d, err := strconv.Atoi(distStr); err == nil && d >= 1 && d <= 3 {
+			distance = d
+		}
+	}
+
+	ctx := r.Context()
+	var terms []segment.TermEntry
+	var total int64
+	var err error
+
+	// Determine which lookup to perform (priority: regex > fuzzy > prefix > list)
+	switch {
+	case regex != "":
+		terms, err = lookup.ListTermsByRegex(ctx, shardID, field, regex, limit)
+		if err != nil {
+			log.Error("regex term lookup failed",
+				logger.Field{Key: "shard_id", Value: shardID},
+				logger.Field{Key: "regex", Value: regex},
+				logger.Field{Key: "error", Value: err},
+			)
+			http.Error(w, "regex lookup failed: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		total = int64(len(terms))
+
+	case fuzzy != "":
+		terms, err = lookup.ListTermsByFuzzy(ctx, shardID, field, fuzzy, distance, limit)
+		if err != nil {
+			log.Error("fuzzy term lookup failed",
+				logger.Field{Key: "shard_id", Value: shardID},
+				logger.Field{Key: "fuzzy", Value: fuzzy},
+				logger.Field{Key: "error", Value: err},
+			)
+			http.Error(w, "fuzzy lookup failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		total = int64(len(terms))
+
+	case prefix != "":
+		terms, err = lookup.ListTermsByPrefix(ctx, shardID, field, prefix, limit)
+		if err != nil {
+			log.Error("prefix term lookup failed",
+				logger.Field{Key: "shard_id", Value: shardID},
+				logger.Field{Key: "prefix", Value: prefix},
+				logger.Field{Key: "error", Value: err},
+			)
+			http.Error(w, "prefix lookup failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		total = int64(len(terms))
+
+	default:
+		terms, total, err = lookup.ListTerms(ctx, shardID, field, limit, offset)
+		if err != nil {
+			log.Error("term list failed",
+				logger.Field{Key: "shard_id", Value: shardID},
+				logger.Field{Key: "error", Value: err},
+			)
+			http.Error(w, "term list failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	response := termLookupResponse{
+		Terms:  terms,
+		Total:  total,
+		Limit:  limit,
+		Offset: offset,
+	}
+
+	log.Info("term lookup executed",
+		logger.Field{Key: "shard_id", Value: shardID},
+		logger.Field{Key: "field", Value: field},
+		logger.Field{Key: "results", Value: len(terms)},
+	)
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.Error("failed to encode term lookup response", logger.Field{Key: "error", Value: err})
+		http.Error(w, "encoding failed", http.StatusInternalServerError)
+		return
+	}
 }

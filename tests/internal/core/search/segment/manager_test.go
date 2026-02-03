@@ -264,9 +264,12 @@ func TestDiskSegmentWriteAndRead(t *testing.T) {
 func TestTermRegistry(t *testing.T) {
 	dir := t.TempDir()
 
-	reg, err := segment.NewMemTermRegistry(dir)
+	reg, err := segment.NewFSTTermRegistry(segment.FSTRegistryConfig{
+		DataDir:          dir,
+		RebuildThreshold: 100,
+	})
 	if err != nil {
-		t.Fatalf("NewMemTermRegistry: %v", err)
+		t.Fatalf("NewFSTTermRegistry: %v", err)
 	}
 	defer reg.Close()
 

@@ -24,8 +24,10 @@ type Manager struct {
 	// Disk segments (immutable, for reads)
 	segments []*DiskSegment
 
-	// Term registry
-	registry *MemTermRegistry
+	// Term registry (FST-backed)
+	registry TermRegistry
+	// ownsRegistry is true if this Manager created the registry and should close it
+	ownsRegistry bool
 
 	// WAL for the active segment
 	wal *wal.WAL
@@ -37,11 +39,11 @@ type Manager struct {
 	manifest *Manifest
 
 	// Background workers
-	flushCh    chan struct{}
-	mergeCh    chan struct{}
-	closeCh    chan struct{}
-	wg         sync.WaitGroup
-	closed     atomic.Bool
+	flushCh chan struct{}
+	mergeCh chan struct{}
+	closeCh chan struct{}
+	wg      sync.WaitGroup
+	closed  atomic.Bool
 
 	// Stats
 	indexedDocs atomic.Int64
@@ -77,11 +79,32 @@ func NewManager(config Config) (*Manager, error) {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
 
-	// Initialize term registry
-	registryDir := filepath.Join(config.DataDir, "registry")
-	registry, err := NewMemTermRegistry(registryDir)
-	if err != nil {
-		return nil, fmt.Errorf("create term registry: %w", err)
+	// Use external registry if provided, otherwise create our own
+	var registry TermRegistry
+	var ownsRegistry bool
+
+	if config.TermRegistry != nil {
+		// Use the provided external registry (shared across shards)
+		registry = config.TermRegistry
+		ownsRegistry = false
+	} else {
+		// Create our own registry (legacy behavior)
+		registryDir := filepath.Join(config.DataDir, "registry")
+
+		mergeConfig := DefaultMergeConfig()
+		if config.TermRegistryMergeConfig != nil {
+			mergeConfig = *config.TermRegistryMergeConfig
+		}
+
+		newRegistry, err := NewPebbleFSTRegistry(PebbleFSTConfig{
+			DataDir:     registryDir,
+			MergeConfig: mergeConfig,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create term registry: %w", err)
+		}
+		registry = newRegistry
+		ownsRegistry = true
 	}
 
 	// Initialize WAL
@@ -95,12 +118,13 @@ func NewManager(config Config) (*Manager, error) {
 	}
 
 	m := &Manager{
-		registry: registry,
-		wal:      activeWAL,
-		config:   config,
-		flushCh:  make(chan struct{}, 1),
-		mergeCh:  make(chan struct{}, 1),
-		closeCh:  make(chan struct{}),
+		registry:     registry,
+		ownsRegistry: ownsRegistry,
+		wal:          activeWAL,
+		config:       config,
+		flushCh:      make(chan struct{}, 1),
+		mergeCh:      make(chan struct{}, 1),
+		closeCh:      make(chan struct{}),
 	}
 
 	// Load or create manifest
@@ -693,8 +717,8 @@ func (m *Manager) Close() error {
 		m.wal.Close()
 	}
 
-	// Close registry
-	if m.registry != nil {
+	// Close registry only if we own it (not shared)
+	if m.registry != nil && m.ownsRegistry {
 		m.registry.Close()
 	}
 
@@ -728,9 +752,8 @@ func (m *Manager) Stats() ManagerStats {
 		stats.TotalDiskDocs += seg.DocCount()
 	}
 
-	regStats := m.registry.Stats()
-	stats.TotalTerms = regStats.TermCount
-	stats.TotalDocs = regStats.TotalDocs
+	stats.TotalTerms = int(m.registry.GetTermCount())
+	stats.TotalDocs = m.registry.GetTotalDocs()
 
 	return stats
 }
@@ -748,8 +771,33 @@ type ManagerStats struct {
 }
 
 // Registry returns the term registry.
-func (m *Manager) Registry() *MemTermRegistry {
+func (m *Manager) Registry() TermRegistry {
 	return m.registry
+}
+
+// FSTRegistry returns the FST registry for advanced term operations.
+func (m *Manager) FSTRegistry() *PebbleFSTRegistry {
+	return m.registry.(*PebbleFSTRegistry)
+}
+
+// ListTerms returns all terms, optionally filtered by field.
+func (m *Manager) ListTerms(ctx context.Context, field string, limit, offset int) ([]TermEntry, int64, error) {
+	return m.FSTRegistry().ListTerms(ctx, field, limit, offset)
+}
+
+// ListTermsByPrefix returns terms matching a prefix.
+func (m *Manager) ListTermsByPrefix(ctx context.Context, field, prefix string, limit int) ([]TermEntry, error) {
+	return m.FSTRegistry().ListTermsByPrefix(ctx, field, prefix, limit)
+}
+
+// ListTermsByFuzzy returns terms within Levenshtein distance of the query.
+func (m *Manager) ListTermsByFuzzy(ctx context.Context, field, query string, maxDistance, limit int) ([]TermEntry, error) {
+	return m.FSTRegistry().ListTermsByFuzzy(ctx, field, query, maxDistance, limit)
+}
+
+// ListTermsByRegex returns terms matching a regex pattern.
+func (m *Manager) ListTermsByRegex(ctx context.Context, field, pattern string, limit int) ([]TermEntry, error) {
+	return m.FSTRegistry().ListTermsByRegex(ctx, field, pattern, limit)
 }
 
 // Load loads the manifest from disk.

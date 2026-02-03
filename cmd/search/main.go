@@ -153,8 +153,17 @@ func main() {
 	}
 	searchService := searchquery.NewSegmentSearchService(getSegmentManager, log)
 
+	// Create term lookup service for term index APIs
+	termLookupService := searchquery.NewTermLookupService(manager, log)
+
 	// Build router with observability middleware
-	baseRouter := searchhttp.NewRouter(indexService, searchService, manager, log)
+	baseRouter := searchhttp.NewRouterWithConfig(searchhttp.RouterConfig{
+		Indexer:     indexService,
+		Searcher:    searchService,
+		ShardSyncer: manager,
+		TermLookup:  termLookupService,
+		Logger:      log,
+	})
 
 	r := chi.NewRouter()
 	r.Use(middleware.Recovery(log))
