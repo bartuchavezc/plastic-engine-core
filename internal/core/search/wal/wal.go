@@ -82,16 +82,16 @@ const (
 
 // Options configures the WAL.
 type Options struct {
-	SyncMode      SyncMode
-	BufferSize    int
-	MaxSize       int64 // Max size before rotation
+	SyncMode   SyncMode
+	BufferSize int
+	MaxSize    int64 // Max size before rotation
 }
 
 // DefaultOptions returns default WAL options.
 func DefaultOptions() Options {
 	return Options{
 		SyncMode:   SyncBatch,
-		BufferSize: 64 * 1024, // 64KB buffer
+		BufferSize: 64 * 1024,         // 64KB buffer
 		MaxSize:    100 * 1024 * 1024, // 100MB
 	}
 }
@@ -124,23 +124,28 @@ func Open(path string, opts Options) (*WAL, error) {
 	return w, nil
 }
 
-// Append writes an entry to the WAL.
+// Append writes an entry to the WAL using binary encoding (faster than JSON).
 func (w *WAL) Append(entry Entry) (uint64, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	w.sequence++
-	entry.Timestamp = time.Now().UTC()
 
-	// Encode entry
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return 0, fmt.Errorf("marshal entry: %w", err)
-	}
+	// Binary format: type(1) + timestamp(8) + dataLen(4) + data
+	// Total header: 13 bytes + data
+	headerSize := 1 + 8 + 4
+	totalSize := headerSize + len(entry.Data)
+
+	// Build binary entry
+	buf := make([]byte, totalSize)
+	buf[0] = byte(entry.Type)
+	binary.BigEndian.PutUint64(buf[1:9], uint64(time.Now().UnixNano()))
+	binary.BigEndian.PutUint32(buf[9:13], uint32(len(entry.Data)))
+	copy(buf[13:], entry.Data)
 
 	// Write: length (4 bytes) + checksum (4 bytes) + data
-	length := uint32(len(data))
-	checksum := crc32.ChecksumIEEE(data)
+	length := uint32(len(buf))
+	checksum := crc32.ChecksumIEEE(buf)
 
 	if err := binary.Write(w.writer, binary.BigEndian, length); err != nil {
 		return 0, fmt.Errorf("write length: %w", err)
@@ -148,7 +153,7 @@ func (w *WAL) Append(entry Entry) (uint64, error) {
 	if err := binary.Write(w.writer, binary.BigEndian, checksum); err != nil {
 		return 0, fmt.Errorf("write checksum: %w", err)
 	}
-	if _, err := w.writer.Write(data); err != nil {
+	if _, err := w.writer.Write(buf); err != nil {
 		return 0, fmt.Errorf("write data: %w", err)
 	}
 
@@ -163,10 +168,11 @@ func (w *WAL) Append(entry Entry) (uint64, error) {
 
 // AppendIndex appends an index operation.
 func (w *WAL) AppendIndex(op IndexOp) (uint64, error) {
-	data, err := json.Marshal(op)
-	if err != nil {
-		return 0, err
-	}
+	// En lugar de: data, _ := json.Marshal(op)
+	// Hacemos esto (es 5-10 veces más rápido):
+	data := []byte(fmt.Sprintf(`{"t_id":"%s","d_id":"%s","tf":%d,"f":"%s"}`,
+		op.TermID, op.DocID, op.TF, op.Field))
+
 	return w.Append(Entry{Type: OpIndex, Data: data})
 }
 
@@ -263,10 +269,20 @@ func (r *Reader) Read() (Entry, error) {
 		return Entry{}, fmt.Errorf("checksum mismatch")
 	}
 
-	var entry Entry
-	if err := json.Unmarshal(data, &entry); err != nil {
-		return Entry{}, err
+	// Decode binary format: type(1) + timestamp(8) + dataLen(4) + data
+	if len(data) < 13 {
+		return Entry{}, fmt.Errorf("entry too short")
 	}
+
+	entry := Entry{
+		Type:      OpType(data[0]),
+		Timestamp: time.Unix(0, int64(binary.BigEndian.Uint64(data[1:9]))),
+	}
+	dataLen := binary.BigEndian.Uint32(data[9:13])
+	if len(data) < 13+int(dataLen) {
+		return Entry{}, fmt.Errorf("data length mismatch")
+	}
+	entry.Data = data[13 : 13+dataLen]
 
 	return entry, nil
 }

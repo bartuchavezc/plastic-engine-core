@@ -3,7 +3,6 @@ package document
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"plastic-engine-core/internal/core/search/segment"
 	"plastic-engine-core/internal/pkg/logger"
@@ -28,44 +27,46 @@ func NewSegmentIndexWriter(segmentMgr *segment.Manager, log logger.Logger) *Segm
 
 // Index stores the tokens for a document.
 func (w *SegmentIndexWriter) Index(ctx context.Context, req DocumentWriteRequest) error {
-	if strings.TrimSpace(req.DocumentID) == "" {
+	if req.DocumentID == "" {
 		return fmt.Errorf("document id is required")
 	}
 
 	// Convert to segment.Manager format
-	fieldTerms := make(map[string][]segment.TermPosting)
+	fieldTerms := make(map[string][]segment.TermPosting, len(req.Fields))
 
 	for _, field := range req.Fields {
 		name := field.Field.Name
-		if strings.TrimSpace(name) == "" {
+		if name == "" {
 			continue
 		}
 
-		// Group tokens by term to calculate TF and positions
-		termData := make(map[string]*segment.TermPosting)
+		tokens := field.Tokens
+		if len(tokens) == 0 {
+			continue
+		}
 
-		for _, token := range field.Tokens {
-			if strings.TrimSpace(token.Term) == "" {
+		// Group tokens by term using index into slice (avoids pointer allocation)
+		termIndex := make(map[string]int, len(tokens)/2) // estimate unique terms
+		postings := make([]segment.TermPosting, 0, len(tokens)/2)
+
+		for _, token := range tokens {
+			if token.Term == "" {
 				continue
 			}
 
-			tp, exists := termData[token.Term]
-			if !exists {
-				tp = &segment.TermPosting{
+			if idx, exists := termIndex[token.Term]; exists {
+				// Term already seen - update in place
+				postings[idx].TF++
+				postings[idx].Positions = append(postings[idx].Positions, token.Position)
+			} else {
+				// New term - add to slice and index
+				termIndex[token.Term] = len(postings)
+				postings = append(postings, segment.TermPosting{
 					Term:      token.Term,
-					TF:        0,
-					Positions: make([]int, 0),
-				}
-				termData[token.Term] = tp
+					TF:        1,
+					Positions: []int{token.Position}, // pre-allocate with first position
+				})
 			}
-			tp.TF++
-			tp.Positions = append(tp.Positions, token.Position)
-		}
-
-		// Convert to slice
-		postings := make([]segment.TermPosting, 0, len(termData))
-		for _, tp := range termData {
-			postings = append(postings, *tp)
 		}
 
 		if len(postings) > 0 {
@@ -77,7 +78,6 @@ func (w *SegmentIndexWriter) Index(ctx context.Context, req DocumentWriteRequest
 		return nil
 	}
 
-	// Index the document using segment manager
 	return w.segmentMgr.IndexDocument(ctx, req.DocumentID, fieldTerms)
 }
 

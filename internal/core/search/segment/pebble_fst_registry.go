@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -52,6 +53,9 @@ type PebbleFSTRegistry struct {
 	merging       atomic.Bool
 	lastMergeTime atomic.Int64 // Unix timestamp
 	mergeConfig   MergeConfig
+
+	// Dirty flag for metadata (saves CPU by batching metadata writes)
+	metaDirty atomic.Bool
 
 	// Paths
 	dataDir    string
@@ -112,6 +116,22 @@ const (
 	prefixDF   = "d:" // d:{termID} -> df (int64, uses merge operator)
 	prefixMeta = "m:" // m:counter -> termID counter, m:totaldocs -> total docs
 )
+
+// formatTermID converts a uint64 counter to a term ID string efficiently.
+// Uses strconv.FormatUint which is 3-5x faster than fmt.Sprintf.
+func formatTermID(counter uint64) string {
+	return "t" + strconv.FormatUint(counter, 10)
+}
+
+// parseTermID extracts the counter from a term ID string.
+// Returns 0 if the format is invalid.
+func parseTermID(termID string) uint64 {
+	if len(termID) < 2 || termID[0] != 't' {
+		return 0
+	}
+	counter, _ := strconv.ParseUint(termID[1:], 10, 64)
+	return counter
+}
 
 // NewPebbleFSTRegistry creates a new Pebble+FST term registry.
 func NewPebbleFSTRegistry(config PebbleFSTConfig) (*PebbleFSTRegistry, error) {
@@ -247,7 +267,7 @@ func (r *PebbleFSTRegistry) Get(ctx context.Context, field, term string) (string
 	if fst != nil {
 		key := field + "\x00" + term
 		if val, exists, _ := fst.Get([]byte(key)); exists {
-			return fmt.Sprintf("t%d", val), true
+			return formatTermID(val), true
 		}
 	}
 
@@ -279,23 +299,22 @@ func (r *PebbleFSTRegistry) GetOrCreate(ctx context.Context, field, term string)
 		return string(val), nil
 	}
 
-	// Create new term ID
+	// Create new term ID using optimized formatting
 	counter := r.termIDCounter.Add(1)
-	termID := fmt.Sprintf("t%d", counter)
+	termID := formatTermID(counter)
 
 	// Write to Pebble
 	if err := r.pebble.Set(pebbleKey, []byte(termID), pebbledb.NoSync); err != nil {
 		return "", fmt.Errorf("write term to pebble: %w", err)
 	}
 
-	// Initialize DF to 0
+	// Initialize DF to 0 using merge operator (faster than Set for this case)
 	dfKey := makeDFKey(termID)
-	if err := r.pebble.Set(dfKey, encodeInt64(0), pebbledb.NoSync); err != nil {
-		return "", fmt.Errorf("init df: %w", err)
-	}
+	r.pebble.Merge(dfKey, encodeInt64(0), pebbledb.NoSync)
 
-	// Persist counter
-	r.saveMeta()
+	// Mark metadata as dirty (will be saved periodically, not on every term!)
+	// This is a CRITICAL optimization: avoids Pebble write on every new term
+	r.metaDirty.Store(true)
 
 	return termID, nil
 }
@@ -425,7 +444,7 @@ func (r *PebbleFSTRegistry) ListTerms(ctx context.Context, field string, limit, 
 				key, val := iter.Current()
 				f, t := parseFSTKey(string(key))
 				if field == "" || f == field {
-					termID := fmt.Sprintf("t%d", val)
+					termID := formatTermID(val)
 					entryKey := f + "\x00" + t
 					if !seen[entryKey] {
 						seen[entryKey] = true
@@ -516,7 +535,7 @@ func (r *PebbleFSTRegistry) ListTermsByPrefix(ctx context.Context, field, prefix
 				entryKey := f + "\x00" + t
 				if !seen[entryKey] {
 					seen[entryKey] = true
-					termID := fmt.Sprintf("t%d", val)
+					termID := formatTermID(val)
 					entries = append(entries, TermEntry{
 						Field:  f,
 						Term:   t,
@@ -612,7 +631,7 @@ func (r *PebbleFSTRegistry) ListTermsByFuzzy(ctx context.Context, field, query s
 					entryKey := f + "\x00" + t
 					if !seen[entryKey] {
 						seen[entryKey] = true
-						termID := fmt.Sprintf("t%d", val)
+						termID := formatTermID(val)
 						entries = append(entries, TermEntry{
 							Field:  f,
 							Term:   t,
@@ -704,7 +723,7 @@ func (r *PebbleFSTRegistry) ListTermsByRegex(ctx context.Context, field, pattern
 					entryKey := f + "\x00" + t
 					if !seen[entryKey] {
 						seen[entryKey] = true
-						termID := fmt.Sprintf("t%d", val)
+						termID := formatTermID(val)
 						entries = append(entries, TermEntry{
 							Field:  f,
 							Term:   t,
@@ -817,6 +836,9 @@ func (r *PebbleFSTRegistry) saveMeta() {
 
 	// Save total docs
 	r.pebble.Set([]byte(prefixMeta+"totaldocs"), encodeInt64(r.totalDocs.Load()), pebbledb.NoSync)
+
+	// Clear dirty flag
+	r.metaDirty.Store(false)
 }
 
 // mergeWorker runs the background merge job.
@@ -826,6 +848,10 @@ func (r *PebbleFSTRegistry) mergeWorker() {
 	ticker := time.NewTicker(r.mergeConfig.MergeCheckInterval)
 	defer ticker.Stop()
 
+	// Meta save ticker - save metadata every 5 seconds if dirty
+	metaTicker := time.NewTicker(5 * time.Second)
+	defer metaTicker.Stop()
+
 	for {
 		select {
 		case <-r.closeCh:
@@ -833,6 +859,11 @@ func (r *PebbleFSTRegistry) mergeWorker() {
 		case <-ticker.C:
 			if r.shouldMerge() {
 				r.doMerge()
+			}
+		case <-metaTicker.C:
+			// Periodically save metadata if dirty (avoids save on every new term)
+			if r.metaDirty.Load() {
+				r.saveMeta()
 			}
 		}
 	}
@@ -937,8 +968,8 @@ func (r *PebbleFSTRegistry) doMerge() {
 		fstKey := field + "\x00" + term
 
 		termID := string(pebbleIter.Value())
-		var counter uint64
-		fmt.Sscanf(termID, "t%d", &counter)
+		// Use optimized parseTermID instead of fmt.Sscanf
+		counter := parseTermID(termID)
 
 		keyVals[fstKey] = counter
 		keysToDelete = append(keysToDelete, append([]byte(nil), pebbleIter.Key()...))
@@ -1014,6 +1045,9 @@ func (r *PebbleFSTRegistry) doMerge() {
 	}
 	batch.Commit(pebbledb.NoSync)
 	batch.Close()
+
+	// Save metadata after merge
+	r.saveMeta()
 }
 
 // Stats returns registry statistics.

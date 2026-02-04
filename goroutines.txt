@@ -1,363 +1,54 @@
-goroutine profile: total 724
-192 @ 0x47beee 0x413f25 0x413ad2 0xadb0ee 0x7625cc 0xadb02c 0x483f81
+goroutine profile: total 64
+12 @ 0x47beee 0x4592b7 0xaf85fb 0x483f81
+#	0xaf85fa	plastic-engine-core/internal/core/search/segment.(*Manager).flushWorker+0xfa	/app/internal/core/search/segment/manager.go:242
+
+12 @ 0x47beee 0x4592b7 0xaf883b 0x483f81
+#	0xaf883a	plastic-engine-core/internal/core/search/segment.(*Manager).mergeWorker+0xfa	/app/internal/core/search/segment/manager.go:261
+
+12 @ 0x47beee 0x4592b7 0xaf8a86 0x483f81
+#	0xaf8a85	plastic-engine-core/internal/core/search/segment.(*Manager).syncWorker+0x105	/app/internal/core/search/segment/manager.go:280
+
+6 @ 0x47beee 0x413f25 0x413ad2 0xadb30e 0x7625cc 0xadb24c 0x483f81
 # labels: {"pebble":"table-cache"}
-#	0xadb0ed	github.com/cockroachdb/pebble.(*tableCacheShard).releaseLoop.func1+0x8d	/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/table_cache.go:385
+#	0xadb30d	github.com/cockroachdb/pebble.(*tableCacheShard).releaseLoop.func1+0x8d	/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/table_cache.go:385
 #	0x7625cb	runtime/pprof.Do+0x8b							/usr/local/go/src/runtime/pprof/runtime.go:51
-#	0xadb02b	github.com/cockroachdb/pebble.(*tableCacheShard).releaseLoop+0x4b	/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/table_cache.go:383
+#	0xadb24b	github.com/cockroachdb/pebble.(*tableCacheShard).releaseLoop+0x4b	/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/table_cache.go:383
 
-176 @ 0x47beee 0x4592b7 0xd7b070 0x483f81
-#	0xd7b06f	plastic-engine-core/internal/core/search/document.(*ShardWorker).loop+0x12f	/app/internal/core/search/document/worker.go:134
+6 @ 0x47beee 0x4592b7 0xc1998c 0x483f81
+#	0xc1998b	google.golang.org/grpc/internal/grpcsync.(*CallbackSerializer).run+0x10b	/go/pkg/mod/google.golang.org/grpc@v1.75.0/internal/grpcsync/callback_serializer.go:88
 
-64 @ 0x47beee 0x4592b7 0x8a1025 0x483f81
-#	0x8a1024	github.com/cockroachdb/pebble/vfs.(*diskHealthCheckingFile).startTicker.func1+0xc4	/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/vfs/disk_health.go:171
-
-32 @ 0x47beee 0x413f25 0x413ad2 0xa4a28d 0xa49d17 0x7625cc 0xa49cf0 0x483f81
-# labels: {"pebble":"gc"}
-#	0xa4a28c	github.com/cockroachdb/pebble.(*cleanupManager).mainLoop+0x18c	/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/cleaner.go:155
-#	0xa49d16	github.com/cockroachdb/pebble.openCleanupManager.func1.1+0x16	/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/cleaner.go:86
-#	0x7625cb	runtime/pprof.Do+0x8b						/usr/local/go/src/runtime/pprof/runtime.go:51
-#	0xa49cef	github.com/cockroachdb/pebble.openCleanupManager.func1+0x4f	/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/cleaner.go:85
-
-32 @ 0x47beee 0x4592b7 0x8a28cf 0x483f81
-#	0x8a28ce	github.com/cockroachdb/pebble/vfs.(*diskHealthCheckingFS).startTickerLocked.func1+0xee	/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/vfs/disk_health.go:566
-
-32 @ 0x47beee 0x4592b7 0xaf7c3b 0x483f81
-#	0xaf7c3a	plastic-engine-core/internal/core/search/segment.(*Manager).flushWorker+0xfa	/app/internal/core/search/segment/manager.go:227
-
-32 @ 0x47beee 0x4592b7 0xaf7e7b 0x483f81
-#	0xaf7e7a	plastic-engine-core/internal/core/search/segment.(*Manager).mergeWorker+0xfa	/app/internal/core/search/segment/manager.go:246
-
-32 @ 0x47beee 0x4592b7 0xaf80c6 0x483f81
-#	0xaf80c5	plastic-engine-core/internal/core/search/segment.(*Manager).syncWorker+0x105	/app/internal/core/search/segment/manager.go:265
-
-32 @ 0x47beee 0x4592b7 0xb03efd 0x483f81
-#	0xb03efc	plastic-engine-core/internal/core/search/segment.(*PebbleFSTRegistry).mergeWorker+0xdc	/app/internal/core/search/segment/pebble_fst_registry.go:830
-
-32 @ 0x47beee 0x4592b7 0xd7b21b 0x483f81
-#	0xd7b21a	plastic-engine-core/internal/core/search/document.(*ShardWorker).flushLoop+0xfa	/app/internal/core/search/document/worker.go:158
-
-32 @ 0x47beee 0x47d5f9 0x47d5d9 0x48dc65 0x9e65e9 0x9e65e4 0x7625cc 0x9e5f70 0x483f81
-# labels: {"pebble":"wal-sync"}
-#	0x47d5d8	sync.runtime_notifyListWait+0x138					/usr/local/go/src/runtime/sema.go:597
-#	0x48dc64	sync.(*Cond).Wait+0x84							/usr/local/go/src/sync/cond.go:71
-#	0x9e65e8	github.com/cockroachdb/pebble/record.(*flusherCond).Wait+0x668		/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/record/log_writer.go:204
-#	0x9e65e3	github.com/cockroachdb/pebble/record.(*LogWriter).flushLoop+0x663	/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/record/log_writer.go:436
-#	0x7625cb	runtime/pprof.Do+0x8b							/usr/local/go/src/runtime/pprof/runtime.go:51
-#	0x9e5f6f	github.com/cockroachdb/pebble/record.NewLogWriter.func2+0x4f		/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/record/log_writer.go:355
-
-6 @ 0x47beee 0x4592b7 0xc1882c 0x483f81
-#	0xc1882b	google.golang.org/grpc/internal/grpcsync.(*CallbackSerializer).run+0x10b	/go/pkg/mod/google.golang.org/grpc@v1.75.0/internal/grpcsync/callback_serializer.go:88
-
-2 @ 0x4786eb 0x8f29c7 0x8f2b0e 0x8f6c65 0xa17c48 0xa17c43 0xa16f5c 0xa1dc6f 0xa16637 0xa1626b 0xadb9d8 0xad99ee 0xab1850 0xab1d57 0xa8f3e8 0xa8ebb3 0xaa5d4f 0xaa4cc5 0xa7714d 0xaff13d 0xaff114 0xaf8276 0xaf881a 0xd7691b 0xd76dee 0xd7d69a 0xd7b997 0xd7b496 0xd7b247 0x483f81
-#	0x8f29c6	github.com/cockroachdb/pebble/internal/manual._Cfunc_calloc+0x46					_cgo_gotypes.go:50
-#	0x8f2b0d	github.com/cockroachdb/pebble/internal/manual.New+0x2d							/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/manual/manual.go:40
-#	0x8f6c64	github.com/cockroachdb/pebble/internal/cache.newValue+0x24						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/value_normal.go:39
-#	0xa17c47	github.com/cockroachdb/pebble/internal/cache.Alloc+0x7c7						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/clockpro.go:856
-#	0xa17c42	github.com/cockroachdb/pebble/sstable.(*Reader).readBlock+0x7c2						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader.go:612
-#	0xa16f5b	github.com/cockroachdb/pebble/sstable.(*Reader).readIndex+0x3b						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader.go:447
-#	0xa1dc6e	github.com/cockroachdb/pebble/sstable.(*singleLevelIterator).init+0x8e					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader_iter_single_lvl.go:183
-#	0xa16636	github.com/cockroachdb/pebble/sstable.(*Reader).newIterWithBlockPropertyFiltersAndContext+0x256		/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader.go:328
-#	0xa1626a	github.com/cockroachdb/pebble/sstable.(*Reader).NewIterWithBlockPropertyFiltersAndContextEtc+0x8a	/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader.go:284
-#	0xadb9d7	github.com/cockroachdb/pebble.(*tableCacheShard).newIters+0x717						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/table_cache.go:532
-#	0xad99ed	github.com/cockroachdb/pebble.(*tableCacheContainer).newIters+0x6d					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/table_cache.go:137
-#	0xab184f	github.com/cockroachdb/pebble.(*levelIter).loadFile+0x2af						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/level_iter.go:678
-#	0xab1d56	github.com/cockroachdb/pebble.(*levelIter).SeekPrefixGE+0xb6						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/level_iter.go:761
-#	0xa8f3e7	github.com/cockroachdb/pebble.(*getIter).Next+0x7c7							/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/get_iter.go:174
-#	0xa8ebb2	github.com/cockroachdb/pebble.(*getIter).First+0x12							/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/get_iter.go:65
-#	0xaa5d4e	github.com/cockroachdb/pebble.(*Iterator).iterFirstWithinBounds+0xce					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/iterator.go:2024
-#	0xaa4cc4	github.com/cockroachdb/pebble.(*Iterator).First+0xe4							/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/iterator.go:1622
-#	0xa7714c	github.com/cockroachdb/pebble.(*DB).getInternal+0x3ac							/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/db.go:592
-#	0xaff13c	github.com/cockroachdb/pebble.(*DB).Get+0x1fc								/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/db.go:520
-#	0xaff113	plastic-engine-core/internal/core/search/segment.(*PebbleFSTRegistry).GetOrCreate+0x1d3			/app/internal/core/search/segment/pebble_fst_registry.go:276
-#	0xaf8275	plastic-engine-core/internal/core/search/segment.(*Manager).Index+0x95					/app/internal/core/search/segment/manager.go:282
-#	0xaf8819	plastic-engine-core/internal/core/search/segment.(*Manager).IndexDocument+0x279				/app/internal/core/search/segment/manager.go:328
-#	0xd7691a	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).Index+0x33a			/app/internal/core/search/document/segment_writer.go:81
-#	0xd76ded	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).IndexBatch+0x1ad		/app/internal/core/search/document/segment_writer.go:95
-#	0xd7d699	plastic-engine-core/internal/core/search/document.(*ShardWorker).processBatch+0x6f9			/app/internal/core/search/document/worker.go:384
-#	0xd7b996	plastic-engine-core/internal/core/search/document.(*ShardWorker).processSwappedBatch+0x4d6		/app/internal/core/search/document/worker.go:210
-#	0xd7b495	plastic-engine-core/internal/core/search/document.(*ShardWorker).doFlush+0x115				/app/internal/core/search/document/worker.go:183
-#	0xd7b246	plastic-engine-core/internal/core/search/document.(*ShardWorker).flushLoop+0x126			/app/internal/core/search/document/worker.go:160
-
-2 @ 0x4786eb 0x8f2a9a 0x8f2bec 0x8f2bcb 0x8f6d50 0x8f6c13 0x8f55bc 0xa17436 0xa17e3e 0xa1e937 0xa1f70c 0xa1fe5f 0xa23565 0xab1db6 0xa8f832 0xa8ebb3 0xaa5d4f 0xaa4cc5 0xa7714d 0xafed35 0xafeb47 0xafefb8 0xaf8276 0xaf881a 0xd7691b 0xd76dee 0xd7d69a 0xd7b997 0xd7b496 0xd7b247 0x483f81
-#	0x8f2a99	github.com/cockroachdb/pebble/internal/manual._Cfunc_free+0x39					_cgo_gotypes.go:64
-#	0x8f2beb	github.com/cockroachdb/pebble/internal/manual.Free.func1+0x4b					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/manual/manual.go:58
-#	0x8f2bca	github.com/cockroachdb/pebble/internal/manual.Free+0x2a						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/manual/manual.go:58
-#	0x8f6d4f	github.com/cockroachdb/pebble/internal/cache.(*Value).free+0x4f					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/value_normal.go:56
-#	0x8f6c12	github.com/cockroachdb/pebble/internal/cache.(*Value).release+0x32				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/value.go:44
-#	0x8f55bb	github.com/cockroachdb/pebble/internal/cache.Free+0x1b						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/clockpro.go:866
-#	0xa17435	github.com/cockroachdb/pebble/sstable.cacheValueOrBuf.release+0x75				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader.go:507
-#	0xa17e3d	github.com/cockroachdb/pebble/sstable.(*Reader).readBlock+0x9bd					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader.go:618
-#	0xa1e936	github.com/cockroachdb/pebble/sstable.(*singleLevelIterator).loadBlock+0x296			/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader_iter_single_lvl.go:398
-#	0xa1f70b	github.com/cockroachdb/pebble/sstable.(*singleLevelIterator).seekGEHelper+0x3cb			/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader_iter_single_lvl.go:712
-#	0xa1fe5e	github.com/cockroachdb/pebble/sstable.(*singleLevelIterator).seekPrefixGE+0x33e			/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader_iter_single_lvl.go:828
-#	0xa23564	github.com/cockroachdb/pebble/sstable.(*twoLevelIterator).SeekPrefixGE+0x764			/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader_iter_two_lvl.go:559
-#	0xab1db5	github.com/cockroachdb/pebble.(*levelIter).SeekPrefixGE+0x115					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/level_iter.go:770
-#	0xa8f831	github.com/cockroachdb/pebble.(*getIter).Next+0xc11						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/get_iter.go:207
-#	0xa8ebb2	github.com/cockroachdb/pebble.(*getIter).First+0x12						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/get_iter.go:65
-#	0xaa5d4e	github.com/cockroachdb/pebble.(*Iterator).iterFirstWithinBounds+0xce				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/iterator.go:2024
-#	0xaa4cc4	github.com/cockroachdb/pebble.(*Iterator).First+0xe4						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/iterator.go:1622
-#	0xa7714c	github.com/cockroachdb/pebble.(*DB).getInternal+0x3ac						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/db.go:592
-#	0xafed34	github.com/cockroachdb/pebble.(*DB).Get+0x2b4							/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/db.go:520
-#	0xafeb46	plastic-engine-core/internal/core/search/segment.(*PebbleFSTRegistry).Get+0xc6			/app/internal/core/search/segment/pebble_fst_registry.go:256
-#	0xafefb7	plastic-engine-core/internal/core/search/segment.(*PebbleFSTRegistry).GetOrCreate+0x77		/app/internal/core/search/segment/pebble_fst_registry.go:268
-#	0xaf8275	plastic-engine-core/internal/core/search/segment.(*Manager).Index+0x95				/app/internal/core/search/segment/manager.go:282
-#	0xaf8819	plastic-engine-core/internal/core/search/segment.(*Manager).IndexDocument+0x279			/app/internal/core/search/segment/manager.go:328
-#	0xd7691a	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).Index+0x33a		/app/internal/core/search/document/segment_writer.go:81
-#	0xd76ded	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).IndexBatch+0x1ad	/app/internal/core/search/document/segment_writer.go:95
-#	0xd7d699	plastic-engine-core/internal/core/search/document.(*ShardWorker).processBatch+0x6f9		/app/internal/core/search/document/worker.go:384
-#	0xd7b996	plastic-engine-core/internal/core/search/document.(*ShardWorker).processSwappedBatch+0x4d6	/app/internal/core/search/document/worker.go:210
-#	0xd7b495	plastic-engine-core/internal/core/search/document.(*ShardWorker).doFlush+0x115			/app/internal/core/search/document/worker.go:183
-#	0xd7b246	plastic-engine-core/internal/core/search/document.(*ShardWorker).flushLoop+0x126		/app/internal/core/search/document/worker.go:160
-
-2 @ 0x47beee 0x43f457 0x47b105 0x4f92e7 0x4fa5da 0x4fa5c8 0x5add25 0x5bd7c5 0x670277 0x4efc91 0xc2c745 0xc2c713 0xc2ce7d 0xc50c52 0x483f81
-#	0x47b104	internal/poll.runtime_pollWait+0x84					/usr/local/go/src/runtime/netpoll.go:351
-#	0x4f92e6	internal/poll.(*pollDesc).wait+0x26					/usr/local/go/src/internal/poll/fd_poll_runtime.go:84
-#	0x4fa5d9	internal/poll.(*pollDesc).waitRead+0x279				/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
-#	0x4fa5c7	internal/poll.(*FD).Read+0x267						/usr/local/go/src/internal/poll/fd_unix.go:165
-#	0x5add24	net.(*netFD).Read+0x24							/usr/local/go/src/net/fd_posix.go:55
-#	0x5bd7c4	net.(*conn).Read+0x44							/usr/local/go/src/net/net.go:194
-#	0x670276	bufio.(*Reader).Read+0x196						/usr/local/go/src/bufio/bufio.go:245
-#	0x4efc90	io.ReadAtLeast+0x90							/usr/local/go/src/io/io.go:335
-#	0xc2c744	io.ReadFull+0x64							/usr/local/go/src/io/io.go:354
-#	0xc2c712	golang.org/x/net/http2.readFrameHeader+0x32				/go/pkg/mod/golang.org/x/net@v0.43.0/http2/frame.go:242
-#	0xc2ce7c	golang.org/x/net/http2.(*Framer).ReadFrame+0x7c				/go/pkg/mod/golang.org/x/net@v0.43.0/http2/frame.go:506
-#	0xc50c51	google.golang.org/grpc/internal/transport.(*http2Client).reader+0x1d1	/go/pkg/mod/google.golang.org/grpc@v1.75.0/internal/transport/http2_client.go:1656
-
-2 @ 0x47beee 0x4592b7 0xc3c368 0xc3cb38 0xc469f2 0x483f81
-#	0xc3c367	google.golang.org/grpc/internal/transport.(*controlBuffer).get+0x107	/go/pkg/mod/google.golang.org/grpc@v1.75.0/internal/transport/controlbuf.go:425
-#	0xc3cb37	google.golang.org/grpc/internal/transport.(*loopyWriter).run+0x77	/go/pkg/mod/google.golang.org/grpc@v1.75.0/internal/transport/controlbuf.go:590
-#	0xc469f1	google.golang.org/grpc/internal/transport.NewHTTP2Client.func6+0xd1	/go/pkg/mod/google.golang.org/grpc@v1.75.0/internal/transport/http2_client.go:469
-
-2 @ 0x47beee 0x4592b7 0xc69e0b 0x483f81
-#	0xc69e0a	google.golang.org/grpc/internal/resolver/dns.(*dnsResolver).watcher+0x24a	/go/pkg/mod/google.golang.org/grpc@v1.75.0/internal/resolver/dns/dns_resolver.go:221
+2 @ 0x47beee 0x4592b7 0x8a1245 0x483f81
+#	0x8a1244	github.com/cockroachdb/pebble/vfs.(*diskHealthCheckingFile).startTicker.func1+0xc4	/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/vfs/disk_health.go:171
 
 1 @ 0x419489 0x47dec9 0x776453 0x483f81
 #	0x47dec8	os/signal.signal_recv+0x28	/usr/local/go/src/runtime/sigqueue.go:152
 #	0x776452	os/signal.loop+0x12		/usr/local/go/src/os/signal/signal_unix.go:23
 
-1 @ 0x43bb71 0x47acfd 0x758171 0x757fa5 0x754dcb 0x76f9ef 0x77a0dc 0x6f2229 0xd8e059 0x6f2229 0xd8f6d7 0x6f2229 0xd8ef5e 0x6f2229 0x777b0e 0x712cce 0x6f0725 0x483f81
+1 @ 0x43bb71 0x47acfd 0x758171 0x757fa5 0x754dcb 0x76f9ef 0x77a0dc 0x6f2229 0xd8f1d9 0x6f2229 0xd90857 0x6f2229 0xd900de 0x6f2229 0x777b0e 0x712cce 0x6f0725 0x483f81
 #	0x758170	runtime/pprof.writeRuntimeProfile+0xb0							/usr/local/go/src/runtime/pprof/pprof.go:796
 #	0x757fa4	runtime/pprof.writeGoroutine+0x44							/usr/local/go/src/runtime/pprof/pprof.go:755
 #	0x754dca	runtime/pprof.(*Profile).WriteTo+0x14a							/usr/local/go/src/runtime/pprof/pprof.go:377
 #	0x76f9ee	net/http/pprof.handler.ServeHTTP+0x52e							/usr/local/go/src/net/http/pprof/pprof.go:272
 #	0x77a0db	github.com/go-chi/chi/v5.(*Mux).routeHTTP+0x31b						/go/pkg/mod/github.com/go-chi/chi/v5@v5.2.3/mux.go:477
 #	0x6f2228	net/http.HandlerFunc.ServeHTTP+0x28							/usr/local/go/src/net/http/server.go:2294
-#	0xd8e058	plastic-engine-core/internal/adapters/telemetry/middleware.Observability.func1.1+0xc78	/app/internal/adapters/telemetry/middleware/http.go:103
+#	0xd8f1d8	plastic-engine-core/internal/adapters/telemetry/middleware.Observability.func1.1+0xc78	/app/internal/adapters/telemetry/middleware/http.go:103
 #	0x6f2228	net/http.HandlerFunc.ServeHTTP+0x28							/usr/local/go/src/net/http/server.go:2294
-#	0xd8f6d6	plastic-engine-core/internal/adapters/telemetry/middleware.RequestID.func1+0x376	/app/internal/adapters/telemetry/middleware/http.go:247
+#	0xd90856	plastic-engine-core/internal/adapters/telemetry/middleware.RequestID.func1+0x376	/app/internal/adapters/telemetry/middleware/http.go:247
 #	0x6f2228	net/http.HandlerFunc.ServeHTTP+0x28							/usr/local/go/src/net/http/server.go:2294
-#	0xd8ef5d	plastic-engine-core/internal/adapters/telemetry/middleware.Recovery.func1.1+0x7d	/app/internal/adapters/telemetry/middleware/http.go:224
+#	0xd900dd	plastic-engine-core/internal/adapters/telemetry/middleware.Recovery.func1.1+0x7d	/app/internal/adapters/telemetry/middleware/http.go:224
 #	0x6f2228	net/http.HandlerFunc.ServeHTTP+0x28							/usr/local/go/src/net/http/server.go:2294
 #	0x777b0d	github.com/go-chi/chi/v5.(*Mux).ServeHTTP+0x2ed						/go/pkg/mod/github.com/go-chi/chi/v5@v5.2.3/mux.go:90
 #	0x712ccd	net/http.serverHandler.ServeHTTP+0x8d							/usr/local/go/src/net/http/server.go:3301
 #	0x6f0724	net/http.(*conn).serve+0x624								/usr/local/go/src/net/http/server.go:2102
 
-1 @ 0x4786eb 0x8f29c7 0x8f2b0e 0x8f6c65 0xa176ae 0xa1769e 0xa16f5c 0xa1dc6f 0xa16637 0xa1626b 0xadb9d8 0xad99ee 0xab1850 0xab1d57 0xa8f3e8 0xa8ebb3 0xaa5d4f 0xaa4cc5 0xa7714d 0xafed35 0xafeb47 0xafefb8 0xaf8276 0xaf881a 0xd7691b 0xd76dee 0xd7d69a 0xd7b997 0xd7b496 0xd7b238 0x483f81
-#	0x8f29c6	github.com/cockroachdb/pebble/internal/manual._Cfunc_calloc+0x46					_cgo_gotypes.go:50
-#	0x8f2b0d	github.com/cockroachdb/pebble/internal/manual.New+0x2d							/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/manual/manual.go:40
-#	0x8f6c64	github.com/cockroachdb/pebble/internal/cache.newValue+0x24						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/value_normal.go:39
-#	0xa176ad	github.com/cockroachdb/pebble/internal/cache.Alloc+0x22d						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/clockpro.go:856
-#	0xa1769d	github.com/cockroachdb/pebble/sstable.(*Reader).readBlock+0x21d						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader.go:558
-#	0xa16f5b	github.com/cockroachdb/pebble/sstable.(*Reader).readIndex+0x3b						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader.go:447
-#	0xa1dc6e	github.com/cockroachdb/pebble/sstable.(*singleLevelIterator).init+0x8e					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader_iter_single_lvl.go:183
-#	0xa16636	github.com/cockroachdb/pebble/sstable.(*Reader).newIterWithBlockPropertyFiltersAndContext+0x256		/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader.go:328
-#	0xa1626a	github.com/cockroachdb/pebble/sstable.(*Reader).NewIterWithBlockPropertyFiltersAndContextEtc+0x8a	/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader.go:284
-#	0xadb9d7	github.com/cockroachdb/pebble.(*tableCacheShard).newIters+0x717						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/table_cache.go:532
-#	0xad99ed	github.com/cockroachdb/pebble.(*tableCacheContainer).newIters+0x6d					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/table_cache.go:137
-#	0xab184f	github.com/cockroachdb/pebble.(*levelIter).loadFile+0x2af						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/level_iter.go:678
-#	0xab1d56	github.com/cockroachdb/pebble.(*levelIter).SeekPrefixGE+0xb6						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/level_iter.go:761
-#	0xa8f3e7	github.com/cockroachdb/pebble.(*getIter).Next+0x7c7							/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/get_iter.go:174
-#	0xa8ebb2	github.com/cockroachdb/pebble.(*getIter).First+0x12							/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/get_iter.go:65
-#	0xaa5d4e	github.com/cockroachdb/pebble.(*Iterator).iterFirstWithinBounds+0xce					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/iterator.go:2024
-#	0xaa4cc4	github.com/cockroachdb/pebble.(*Iterator).First+0xe4							/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/iterator.go:1622
-#	0xa7714c	github.com/cockroachdb/pebble.(*DB).getInternal+0x3ac							/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/db.go:592
-#	0xafed34	github.com/cockroachdb/pebble.(*DB).Get+0x2b4								/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/db.go:520
-#	0xafeb46	plastic-engine-core/internal/core/search/segment.(*PebbleFSTRegistry).Get+0xc6				/app/internal/core/search/segment/pebble_fst_registry.go:256
-#	0xafefb7	plastic-engine-core/internal/core/search/segment.(*PebbleFSTRegistry).GetOrCreate+0x77			/app/internal/core/search/segment/pebble_fst_registry.go:268
-#	0xaf8275	plastic-engine-core/internal/core/search/segment.(*Manager).Index+0x95					/app/internal/core/search/segment/manager.go:282
-#	0xaf8819	plastic-engine-core/internal/core/search/segment.(*Manager).IndexDocument+0x279				/app/internal/core/search/segment/manager.go:328
-#	0xd7691a	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).Index+0x33a			/app/internal/core/search/document/segment_writer.go:81
-#	0xd76ded	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).IndexBatch+0x1ad		/app/internal/core/search/document/segment_writer.go:95
-#	0xd7d699	plastic-engine-core/internal/core/search/document.(*ShardWorker).processBatch+0x6f9			/app/internal/core/search/document/worker.go:384
-#	0xd7b996	plastic-engine-core/internal/core/search/document.(*ShardWorker).processSwappedBatch+0x4d6		/app/internal/core/search/document/worker.go:210
-#	0xd7b495	plastic-engine-core/internal/core/search/document.(*ShardWorker).doFlush+0x115				/app/internal/core/search/document/worker.go:183
-#	0xd7b237	plastic-engine-core/internal/core/search/document.(*ShardWorker).flushLoop+0x117			/app/internal/core/search/document/worker.go:162
+1 @ 0x47beee 0x413f25 0x413ad2 0xa4a4ad 0xa49f37 0x7625cc 0xa49f10 0x483f81
+# labels: {"pebble":"gc"}
+#	0xa4a4ac	github.com/cockroachdb/pebble.(*cleanupManager).mainLoop+0x18c	/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/cleaner.go:155
+#	0xa49f36	github.com/cockroachdb/pebble.openCleanupManager.func1.1+0x16	/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/cleaner.go:86
+#	0x7625cb	runtime/pprof.Do+0x8b						/usr/local/go/src/runtime/pprof/runtime.go:51
+#	0xa49f0f	github.com/cockroachdb/pebble.openCleanupManager.func1+0x4f	/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/cleaner.go:85
 
-1 @ 0x4786eb 0x8f29c7 0x8f2b0e 0x8f6c65 0xa176ae 0xa1769e 0xa21f39 0xa2345e 0xab1db6 0xa8f832 0xa8ebb3 0xaa5d4f 0xaa4cc5 0xa7714d 0xaff13d 0xaff114 0xaf8276 0xaf881a 0xd7691b 0xd76dee 0xd7d69a 0xd7b997 0xd7b496 0xd7b247 0x483f81
-#	0x8f29c6	github.com/cockroachdb/pebble/internal/manual._Cfunc_calloc+0x46				_cgo_gotypes.go:50
-#	0x8f2b0d	github.com/cockroachdb/pebble/internal/manual.New+0x2d						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/manual/manual.go:40
-#	0x8f6c64	github.com/cockroachdb/pebble/internal/cache.newValue+0x24					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/value_normal.go:39
-#	0xa176ad	github.com/cockroachdb/pebble/internal/cache.Alloc+0x22d					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/clockpro.go:856
-#	0xa1769d	github.com/cockroachdb/pebble/sstable.(*Reader).readBlock+0x21d					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader.go:558
-#	0xa21f38	github.com/cockroachdb/pebble/sstable.(*twoLevelIterator).loadIndex+0x238			/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader_iter_two_lvl.go:64
-#	0xa2345d	github.com/cockroachdb/pebble/sstable.(*twoLevelIterator).SeekPrefixGE+0x65d			/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader_iter_two_lvl.go:485
-#	0xab1db5	github.com/cockroachdb/pebble.(*levelIter).SeekPrefixGE+0x115					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/level_iter.go:770
-#	0xa8f831	github.com/cockroachdb/pebble.(*getIter).Next+0xc11						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/get_iter.go:207
-#	0xa8ebb2	github.com/cockroachdb/pebble.(*getIter).First+0x12						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/get_iter.go:65
-#	0xaa5d4e	github.com/cockroachdb/pebble.(*Iterator).iterFirstWithinBounds+0xce				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/iterator.go:2024
-#	0xaa4cc4	github.com/cockroachdb/pebble.(*Iterator).First+0xe4						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/iterator.go:1622
-#	0xa7714c	github.com/cockroachdb/pebble.(*DB).getInternal+0x3ac						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/db.go:592
-#	0xaff13c	github.com/cockroachdb/pebble.(*DB).Get+0x1fc							/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/db.go:520
-#	0xaff113	plastic-engine-core/internal/core/search/segment.(*PebbleFSTRegistry).GetOrCreate+0x1d3		/app/internal/core/search/segment/pebble_fst_registry.go:276
-#	0xaf8275	plastic-engine-core/internal/core/search/segment.(*Manager).Index+0x95				/app/internal/core/search/segment/manager.go:282
-#	0xaf8819	plastic-engine-core/internal/core/search/segment.(*Manager).IndexDocument+0x279			/app/internal/core/search/segment/manager.go:328
-#	0xd7691a	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).Index+0x33a		/app/internal/core/search/document/segment_writer.go:81
-#	0xd76ded	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).IndexBatch+0x1ad	/app/internal/core/search/document/segment_writer.go:95
-#	0xd7d699	plastic-engine-core/internal/core/search/document.(*ShardWorker).processBatch+0x6f9		/app/internal/core/search/document/worker.go:384
-#	0xd7b996	plastic-engine-core/internal/core/search/document.(*ShardWorker).processSwappedBatch+0x4d6	/app/internal/core/search/document/worker.go:210
-#	0xd7b495	plastic-engine-core/internal/core/search/document.(*ShardWorker).doFlush+0x115			/app/internal/core/search/document/worker.go:183
-#	0xd7b246	plastic-engine-core/internal/core/search/document.(*ShardWorker).flushLoop+0x126		/app/internal/core/search/document/worker.go:160
-
-1 @ 0x4786eb 0x8f29c7 0x8f2b0e 0x8f6c65 0xa17c48 0xa17c43 0xa1e937 0xa1f70c 0xa1fe5f 0xa1fab4 0xab1db6 0xa8f3e8 0xa8ebb3 0xaa5d4f 0xaa4cc5 0xa7714d 0xafed35 0xafeb47 0xafefb8 0xaf8276 0xaf881a 0xd7691b 0xd76dee 0xd7d69a 0xd7b997 0xd7b496 0xd7b247 0x483f81
-#	0x8f29c6	github.com/cockroachdb/pebble/internal/manual._Cfunc_calloc+0x46				_cgo_gotypes.go:50
-#	0x8f2b0d	github.com/cockroachdb/pebble/internal/manual.New+0x2d						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/manual/manual.go:40
-#	0x8f6c64	github.com/cockroachdb/pebble/internal/cache.newValue+0x24					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/value_normal.go:39
-#	0xa17c47	github.com/cockroachdb/pebble/internal/cache.Alloc+0x7c7					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/clockpro.go:856
-#	0xa17c42	github.com/cockroachdb/pebble/sstable.(*Reader).readBlock+0x7c2					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader.go:612
-#	0xa1e936	github.com/cockroachdb/pebble/sstable.(*singleLevelIterator).loadBlock+0x296			/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader_iter_single_lvl.go:398
-#	0xa1f70b	github.com/cockroachdb/pebble/sstable.(*singleLevelIterator).seekGEHelper+0x3cb			/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader_iter_single_lvl.go:712
-#	0xa1fe5e	github.com/cockroachdb/pebble/sstable.(*singleLevelIterator).seekPrefixGE+0x33e			/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader_iter_single_lvl.go:828
-#	0xa1fab3	github.com/cockroachdb/pebble/sstable.(*singleLevelIterator).SeekPrefixGE+0xd3			/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader_iter_single_lvl.go:765
-#	0xab1db5	github.com/cockroachdb/pebble.(*levelIter).SeekPrefixGE+0x115					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/level_iter.go:770
-#	0xa8f3e7	github.com/cockroachdb/pebble.(*getIter).Next+0x7c7						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/get_iter.go:174
-#	0xa8ebb2	github.com/cockroachdb/pebble.(*getIter).First+0x12						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/get_iter.go:65
-#	0xaa5d4e	github.com/cockroachdb/pebble.(*Iterator).iterFirstWithinBounds+0xce				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/iterator.go:2024
-#	0xaa4cc4	github.com/cockroachdb/pebble.(*Iterator).First+0xe4						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/iterator.go:1622
-#	0xa7714c	github.com/cockroachdb/pebble.(*DB).getInternal+0x3ac						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/db.go:592
-#	0xafed34	github.com/cockroachdb/pebble.(*DB).Get+0x2b4							/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/db.go:520
-#	0xafeb46	plastic-engine-core/internal/core/search/segment.(*PebbleFSTRegistry).Get+0xc6			/app/internal/core/search/segment/pebble_fst_registry.go:256
-#	0xafefb7	plastic-engine-core/internal/core/search/segment.(*PebbleFSTRegistry).GetOrCreate+0x77		/app/internal/core/search/segment/pebble_fst_registry.go:268
-#	0xaf8275	plastic-engine-core/internal/core/search/segment.(*Manager).Index+0x95				/app/internal/core/search/segment/manager.go:282
-#	0xaf8819	plastic-engine-core/internal/core/search/segment.(*Manager).IndexDocument+0x279			/app/internal/core/search/segment/manager.go:328
-#	0xd7691a	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).Index+0x33a		/app/internal/core/search/document/segment_writer.go:81
-#	0xd76ded	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).IndexBatch+0x1ad	/app/internal/core/search/document/segment_writer.go:95
-#	0xd7d699	plastic-engine-core/internal/core/search/document.(*ShardWorker).processBatch+0x6f9		/app/internal/core/search/document/worker.go:384
-#	0xd7b996	plastic-engine-core/internal/core/search/document.(*ShardWorker).processSwappedBatch+0x4d6	/app/internal/core/search/document/worker.go:210
-#	0xd7b495	plastic-engine-core/internal/core/search/document.(*ShardWorker).doFlush+0x115			/app/internal/core/search/document/worker.go:183
-#	0xd7b246	plastic-engine-core/internal/core/search/document.(*ShardWorker).flushLoop+0x126		/app/internal/core/search/document/worker.go:160
-
-1 @ 0x4786eb 0x8f2a9a 0x8f2bec 0x8f2bcb 0x8f6d50 0x8f6c13 0x8f55bc 0xa17436 0xa17e3e 0xa1e937 0xa1f70c 0xa1fe5f 0xa23565 0xab1db6 0xa8f832 0xa8ebb3 0xaa5d4f 0xaa4cc5 0xa7714d 0xaff13d 0xaff114 0xaf8276 0xaf881a 0xd7691b 0xd76dee 0xd7d69a 0xd7b997 0xd7b496 0xd7b247 0x483f81
-#	0x8f2a99	github.com/cockroachdb/pebble/internal/manual._Cfunc_free+0x39					_cgo_gotypes.go:64
-#	0x8f2beb	github.com/cockroachdb/pebble/internal/manual.Free.func1+0x4b					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/manual/manual.go:58
-#	0x8f2bca	github.com/cockroachdb/pebble/internal/manual.Free+0x2a						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/manual/manual.go:58
-#	0x8f6d4f	github.com/cockroachdb/pebble/internal/cache.(*Value).free+0x4f					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/value_normal.go:56
-#	0x8f6c12	github.com/cockroachdb/pebble/internal/cache.(*Value).release+0x32				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/value.go:44
-#	0x8f55bb	github.com/cockroachdb/pebble/internal/cache.Free+0x1b						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/clockpro.go:866
-#	0xa17435	github.com/cockroachdb/pebble/sstable.cacheValueOrBuf.release+0x75				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader.go:507
-#	0xa17e3d	github.com/cockroachdb/pebble/sstable.(*Reader).readBlock+0x9bd					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader.go:618
-#	0xa1e936	github.com/cockroachdb/pebble/sstable.(*singleLevelIterator).loadBlock+0x296			/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader_iter_single_lvl.go:398
-#	0xa1f70b	github.com/cockroachdb/pebble/sstable.(*singleLevelIterator).seekGEHelper+0x3cb			/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader_iter_single_lvl.go:712
-#	0xa1fe5e	github.com/cockroachdb/pebble/sstable.(*singleLevelIterator).seekPrefixGE+0x33e			/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader_iter_single_lvl.go:828
-#	0xa23564	github.com/cockroachdb/pebble/sstable.(*twoLevelIterator).SeekPrefixGE+0x764			/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader_iter_two_lvl.go:559
-#	0xab1db5	github.com/cockroachdb/pebble.(*levelIter).SeekPrefixGE+0x115					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/level_iter.go:770
-#	0xa8f831	github.com/cockroachdb/pebble.(*getIter).Next+0xc11						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/get_iter.go:207
-#	0xa8ebb2	github.com/cockroachdb/pebble.(*getIter).First+0x12						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/get_iter.go:65
-#	0xaa5d4e	github.com/cockroachdb/pebble.(*Iterator).iterFirstWithinBounds+0xce				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/iterator.go:2024
-#	0xaa4cc4	github.com/cockroachdb/pebble.(*Iterator).First+0xe4						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/iterator.go:1622
-#	0xa7714c	github.com/cockroachdb/pebble.(*DB).getInternal+0x3ac						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/db.go:592
-#	0xaff13c	github.com/cockroachdb/pebble.(*DB).Get+0x1fc							/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/db.go:520
-#	0xaff113	plastic-engine-core/internal/core/search/segment.(*PebbleFSTRegistry).GetOrCreate+0x1d3		/app/internal/core/search/segment/pebble_fst_registry.go:276
-#	0xaf8275	plastic-engine-core/internal/core/search/segment.(*Manager).Index+0x95				/app/internal/core/search/segment/manager.go:282
-#	0xaf8819	plastic-engine-core/internal/core/search/segment.(*Manager).IndexDocument+0x279			/app/internal/core/search/segment/manager.go:328
-#	0xd7691a	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).Index+0x33a		/app/internal/core/search/document/segment_writer.go:81
-#	0xd76ded	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).IndexBatch+0x1ad	/app/internal/core/search/document/segment_writer.go:95
-#	0xd7d699	plastic-engine-core/internal/core/search/document.(*ShardWorker).processBatch+0x6f9		/app/internal/core/search/document/worker.go:384
-#	0xd7b996	plastic-engine-core/internal/core/search/document.(*ShardWorker).processSwappedBatch+0x4d6	/app/internal/core/search/document/worker.go:210
-#	0xd7b495	plastic-engine-core/internal/core/search/document.(*ShardWorker).doFlush+0x115			/app/internal/core/search/document/worker.go:183
-#	0xd7b246	plastic-engine-core/internal/core/search/document.(*ShardWorker).flushLoop+0x126		/app/internal/core/search/document/worker.go:160
-
-1 @ 0x4786eb 0x8f2a9a 0x8f2bec 0x8f2bcb 0x8f6d50 0x8f6c13 0xa0bfe7 0xa0bfe2 0xa21678 0xa21647 0xab2e32 0xa8fe33 0xa8ebb3 0xaa5d4f 0xaa4cc5 0xa7714d 0xaff13d 0xaff114 0xaf8276 0xaf881a 0xd7691b 0xd76dee 0xd7d69a 0xd7b997 0xd7b496 0xd7b247 0x483f81
-#	0x8f2a99	github.com/cockroachdb/pebble/internal/manual._Cfunc_free+0x39					_cgo_gotypes.go:64
-#	0x8f2beb	github.com/cockroachdb/pebble/internal/manual.Free.func1+0x4b					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/manual/manual.go:58
-#	0x8f2bca	github.com/cockroachdb/pebble/internal/manual.Free+0x2a						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/manual/manual.go:58
-#	0x8f6d4f	github.com/cockroachdb/pebble/internal/cache.(*Value).free+0x4f					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/value_normal.go:56
-#	0x8f6c12	github.com/cockroachdb/pebble/internal/cache.(*Value).release+0x32				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/value.go:44
-#	0xa0bfe6	github.com/cockroachdb/pebble/internal/cache.Handle.Release+0x26				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/clockpro.go:74
-#	0xa0bfe1	github.com/cockroachdb/pebble/sstable.bufferHandle.Release+0x21					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/buffer_pool.go:32
-#	0xa21677	github.com/cockroachdb/pebble/sstable.(*blockIter).Close+0x77					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/block.go:1530
-#	0xa21646	github.com/cockroachdb/pebble/sstable.(*singleLevelIterator).Close+0x46				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader_iter_single_lvl.go:1364
-#	0xab2e31	github.com/cockroachdb/pebble.(*levelIter).Close+0x31						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/level_iter.go:1202
-#	0xa8fe32	github.com/cockroachdb/pebble.(*getIter).Next+0x1212						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/get_iter.go:113
-#	0xa8ebb2	github.com/cockroachdb/pebble.(*getIter).First+0x12						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/get_iter.go:65
-#	0xaa5d4e	github.com/cockroachdb/pebble.(*Iterator).iterFirstWithinBounds+0xce				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/iterator.go:2024
-#	0xaa4cc4	github.com/cockroachdb/pebble.(*Iterator).First+0xe4						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/iterator.go:1622
-#	0xa7714c	github.com/cockroachdb/pebble.(*DB).getInternal+0x3ac						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/db.go:592
-#	0xaff13c	github.com/cockroachdb/pebble.(*DB).Get+0x1fc							/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/db.go:520
-#	0xaff113	plastic-engine-core/internal/core/search/segment.(*PebbleFSTRegistry).GetOrCreate+0x1d3		/app/internal/core/search/segment/pebble_fst_registry.go:276
-#	0xaf8275	plastic-engine-core/internal/core/search/segment.(*Manager).Index+0x95				/app/internal/core/search/segment/manager.go:282
-#	0xaf8819	plastic-engine-core/internal/core/search/segment.(*Manager).IndexDocument+0x279			/app/internal/core/search/segment/manager.go:328
-#	0xd7691a	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).Index+0x33a		/app/internal/core/search/document/segment_writer.go:81
-#	0xd76ded	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).IndexBatch+0x1ad	/app/internal/core/search/document/segment_writer.go:95
-#	0xd7d699	plastic-engine-core/internal/core/search/document.(*ShardWorker).processBatch+0x6f9		/app/internal/core/search/document/worker.go:384
-#	0xd7b996	plastic-engine-core/internal/core/search/document.(*ShardWorker).processSwappedBatch+0x4d6	/app/internal/core/search/document/worker.go:210
-#	0xd7b495	plastic-engine-core/internal/core/search/document.(*ShardWorker).doFlush+0x115			/app/internal/core/search/document/worker.go:183
-#	0xd7b246	plastic-engine-core/internal/core/search/document.(*ShardWorker).flushLoop+0x126		/app/internal/core/search/document/worker.go:160
-
-1 @ 0x4786eb 0x8f2a9a 0x8f2bec 0x8f2bcb 0x8f6d50 0x8f6c13 0xa0bfe7 0xa0bfe2 0xa245b8 0xa24587 0xab2e32 0xa8fe33 0xa8ebb3 0xaa5d4f 0xaa4cc5 0xa7714d 0xafed35 0xafeb47 0xafefb8 0xaf8276 0xaf881a 0xd7691b 0xd76dee 0xd7d69a 0xd7b997 0xd7b496 0xd7b238 0x483f81
-#	0x8f2a99	github.com/cockroachdb/pebble/internal/manual._Cfunc_free+0x39					_cgo_gotypes.go:64
-#	0x8f2beb	github.com/cockroachdb/pebble/internal/manual.Free.func1+0x4b					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/manual/manual.go:58
-#	0x8f2bca	github.com/cockroachdb/pebble/internal/manual.Free+0x2a						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/manual/manual.go:58
-#	0x8f6d4f	github.com/cockroachdb/pebble/internal/cache.(*Value).free+0x4f					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/value_normal.go:56
-#	0x8f6c12	github.com/cockroachdb/pebble/internal/cache.(*Value).release+0x32				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/value.go:44
-#	0xa0bfe6	github.com/cockroachdb/pebble/internal/cache.Handle.Release+0x26				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/clockpro.go:74
-#	0xa0bfe1	github.com/cockroachdb/pebble/sstable.bufferHandle.Release+0x21					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/buffer_pool.go:32
-#	0xa245b7	github.com/cockroachdb/pebble/sstable.(*blockIter).Close+0x77					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/block.go:1530
-#	0xa24586	github.com/cockroachdb/pebble/sstable.(*twoLevelIterator).Close+0x46				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader_iter_two_lvl.go:949
-#	0xab2e31	github.com/cockroachdb/pebble.(*levelIter).Close+0x31						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/level_iter.go:1202
-#	0xa8fe32	github.com/cockroachdb/pebble.(*getIter).Next+0x1212						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/get_iter.go:113
-#	0xa8ebb2	github.com/cockroachdb/pebble.(*getIter).First+0x12						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/get_iter.go:65
-#	0xaa5d4e	github.com/cockroachdb/pebble.(*Iterator).iterFirstWithinBounds+0xce				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/iterator.go:2024
-#	0xaa4cc4	github.com/cockroachdb/pebble.(*Iterator).First+0xe4						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/iterator.go:1622
-#	0xa7714c	github.com/cockroachdb/pebble.(*DB).getInternal+0x3ac						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/db.go:592
-#	0xafed34	github.com/cockroachdb/pebble.(*DB).Get+0x2b4							/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/db.go:520
-#	0xafeb46	plastic-engine-core/internal/core/search/segment.(*PebbleFSTRegistry).Get+0xc6			/app/internal/core/search/segment/pebble_fst_registry.go:256
-#	0xafefb7	plastic-engine-core/internal/core/search/segment.(*PebbleFSTRegistry).GetOrCreate+0x77		/app/internal/core/search/segment/pebble_fst_registry.go:268
-#	0xaf8275	plastic-engine-core/internal/core/search/segment.(*Manager).Index+0x95				/app/internal/core/search/segment/manager.go:282
-#	0xaf8819	plastic-engine-core/internal/core/search/segment.(*Manager).IndexDocument+0x279			/app/internal/core/search/segment/manager.go:328
-#	0xd7691a	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).Index+0x33a		/app/internal/core/search/document/segment_writer.go:81
-#	0xd76ded	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).IndexBatch+0x1ad	/app/internal/core/search/document/segment_writer.go:95
-#	0xd7d699	plastic-engine-core/internal/core/search/document.(*ShardWorker).processBatch+0x6f9		/app/internal/core/search/document/worker.go:384
-#	0xd7b996	plastic-engine-core/internal/core/search/document.(*ShardWorker).processSwappedBatch+0x4d6	/app/internal/core/search/document/worker.go:210
-#	0xd7b495	plastic-engine-core/internal/core/search/document.(*ShardWorker).doFlush+0x115			/app/internal/core/search/document/worker.go:183
-#	0xd7b237	plastic-engine-core/internal/core/search/document.(*ShardWorker).flushLoop+0x117		/app/internal/core/search/document/worker.go:162
-
-1 @ 0x4786eb 0x8f2a9a 0x8f2bec 0x8f2bcb 0x8f6d50 0x8f6c13 0xa0bfe7 0xa0bfe2 0xa2478d 0xa2483e 0xab2e32 0xa9020a 0xaa6caa 0xafedc9 0xafefb8 0xaf8276 0xaf881a 0xd7691b 0xd76dee 0xd7d69a 0xd7b997 0xd7b496 0xd7b238 0x483f81
-#	0x8f2a99	github.com/cockroachdb/pebble/internal/manual._Cfunc_free+0x39					_cgo_gotypes.go:64
-#	0x8f2beb	github.com/cockroachdb/pebble/internal/manual.Free.func1+0x4b					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/manual/manual.go:58
-#	0x8f2bca	github.com/cockroachdb/pebble/internal/manual.Free+0x2a						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/manual/manual.go:58
-#	0x8f6d4f	github.com/cockroachdb/pebble/internal/cache.(*Value).free+0x4f					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/value_normal.go:56
-#	0x8f6c12	github.com/cockroachdb/pebble/internal/cache.(*Value).release+0x32				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/value.go:44
-#	0xa0bfe6	github.com/cockroachdb/pebble/internal/cache.Handle.Release+0x26				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/cache/clockpro.go:74
-#	0xa0bfe1	github.com/cockroachdb/pebble/sstable.bufferHandle.Release+0x21					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/buffer_pool.go:32
-#	0xa2478c	github.com/cockroachdb/pebble/sstable.(*blockIter).Close+0x24c					/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/block.go:1530
-#	0xa2483d	github.com/cockroachdb/pebble/sstable.(*twoLevelIterator).Close+0x2fd				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/sstable/reader_iter_two_lvl.go:951
-#	0xab2e31	github.com/cockroachdb/pebble.(*levelIter).Close+0x31						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/level_iter.go:1202
-#	0xa90209	github.com/cockroachdb/pebble.(*getIter).Close+0x29						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/get_iter.go:233
-#	0xaa6ca9	github.com/cockroachdb/pebble.(*Iterator).Close+0x49						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/iterator.go:2258
-#	0xafedc8	plastic-engine-core/internal/core/search/segment.(*PebbleFSTRegistry).Get+0x348			/app/internal/core/search/segment/pebble_fst_registry.go:259
-#	0xafefb7	plastic-engine-core/internal/core/search/segment.(*PebbleFSTRegistry).GetOrCreate+0x77		/app/internal/core/search/segment/pebble_fst_registry.go:268
-#	0xaf8275	plastic-engine-core/internal/core/search/segment.(*Manager).Index+0x95				/app/internal/core/search/segment/manager.go:282
-#	0xaf8819	plastic-engine-core/internal/core/search/segment.(*Manager).IndexDocument+0x279			/app/internal/core/search/segment/manager.go:328
-#	0xd7691a	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).Index+0x33a		/app/internal/core/search/document/segment_writer.go:81
-#	0xd76ded	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).IndexBatch+0x1ad	/app/internal/core/search/document/segment_writer.go:95
-#	0xd7d699	plastic-engine-core/internal/core/search/document.(*ShardWorker).processBatch+0x6f9		/app/internal/core/search/document/worker.go:384
-#	0xd7b996	plastic-engine-core/internal/core/search/document.(*ShardWorker).processSwappedBatch+0x4d6	/app/internal/core/search/document/worker.go:210
-#	0xd7b495	plastic-engine-core/internal/core/search/document.(*ShardWorker).doFlush+0x115			/app/internal/core/search/document/worker.go:183
-#	0xd7b237	plastic-engine-core/internal/core/search/document.(*ShardWorker).flushLoop+0x117		/app/internal/core/search/document/worker.go:162
-
-1 @ 0x47beee 0x43f457 0x47b105 0x4f92e7 0x4fa5da 0x4fa5c8 0x5add25 0x5bd7c5 0x70bc87 0x66fd43 0x66fe73 0x70c792 0x483f81
-#	0x47b104	internal/poll.runtime_pollWait+0x84		/usr/local/go/src/runtime/netpoll.go:351
-#	0x4f92e6	internal/poll.(*pollDesc).wait+0x26		/usr/local/go/src/internal/poll/fd_poll_runtime.go:84
-#	0x4fa5d9	internal/poll.(*pollDesc).waitRead+0x279	/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
-#	0x4fa5c7	internal/poll.(*FD).Read+0x267			/usr/local/go/src/internal/poll/fd_unix.go:165
-#	0x5add24	net.(*netFD).Read+0x24				/usr/local/go/src/net/fd_posix.go:55
-#	0x5bd7c4	net.(*conn).Read+0x44				/usr/local/go/src/net/net.go:194
-#	0x70bc86	net/http.(*persistConn).Read+0x46		/usr/local/go/src/net/http/transport.go:2125
-#	0x66fd42	bufio.(*Reader).fill+0x102			/usr/local/go/src/bufio/bufio.go:113
-#	0x66fe72	bufio.(*Reader).Peek+0x52			/usr/local/go/src/bufio/bufio.go:152
-#	0x70c791	net/http.(*persistConn).readLoop+0x171		/usr/local/go/src/net/http/transport.go:2278
-
-1 @ 0x47beee 0x43f457 0x47b105 0x4f92e7 0x4fe6b5 0x4fe6a3 0x5afcc9 0x5c673b 0x5c5930 0x6f5c0c 0x6f5811 0xd70819 0x483f81
+1 @ 0x47beee 0x43f457 0x47b105 0x4f92e7 0x4fe6b5 0x4fe6a3 0x5afcc9 0x5c673b 0x5c5930 0x6f5c0c 0x6f5811 0xd71979 0x483f81
 #	0x47b104	internal/poll.runtime_pollWait+0x84								/usr/local/go/src/runtime/netpoll.go:351
 #	0x4f92e6	internal/poll.(*pollDesc).wait+0x26								/usr/local/go/src/internal/poll/fd_poll_runtime.go:84
 #	0x4fe6b4	internal/poll.(*pollDesc).waitRead+0x294							/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
@@ -367,9 +58,9 @@ goroutine profile: total 724
 #	0x5c592f	net.(*TCPListener).Accept+0x2f									/usr/local/go/src/net/tcpsock.go:380
 #	0x6f5c0b	net/http.(*Server).Serve+0x30b									/usr/local/go/src/net/http/server.go:3424
 #	0x6f5810	net/http.(*Server).ListenAndServe+0x70								/usr/local/go/src/net/http/server.go:3350
-#	0xd70818	plastic-engine-core/internal/adapters/telemetry/metrics.(*Provider).startPrometheusServer+0x218	/app/internal/adapters/telemetry/metrics/metrics.go:317
+#	0xd71978	plastic-engine-core/internal/adapters/telemetry/metrics.(*Provider).startPrometheusServer+0x218	/app/internal/adapters/telemetry/metrics/metrics.go:317
 
-1 @ 0x47beee 0x43f457 0x47b105 0x4f92e7 0x4fe6b5 0x4fe6a3 0x5afcc9 0x5c673b 0x5c5930 0x6f5c0c 0x6f5811 0xdc1e45 0x483f81
+1 @ 0x47beee 0x43f457 0x47b105 0x4f92e7 0x4fe6b5 0x4fe6a3 0x5afcc9 0x5c673b 0x5c5930 0x6f5c0c 0x6f5811 0xdc2fe5 0x483f81
 #	0x47b104	internal/poll.runtime_pollWait+0x84		/usr/local/go/src/runtime/netpoll.go:351
 #	0x4f92e6	internal/poll.(*pollDesc).wait+0x26		/usr/local/go/src/internal/poll/fd_poll_runtime.go:84
 #	0x4fe6b4	internal/poll.(*pollDesc).waitRead+0x294	/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
@@ -379,49 +70,48 @@ goroutine profile: total 724
 #	0x5c592f	net.(*TCPListener).Accept+0x2f			/usr/local/go/src/net/tcpsock.go:380
 #	0x6f5c0b	net/http.(*Server).Serve+0x30b			/usr/local/go/src/net/http/server.go:3424
 #	0x6f5810	net/http.(*Server).ListenAndServe+0x70		/usr/local/go/src/net/http/server.go:3350
-#	0xdc1e44	main.main.func7+0x1c4				/app/cmd/search/main.go:224
-
-1 @ 0x47beee 0x4592b7 0x70e0a7 0x483f81
-#	0x70e0a6	net/http.(*persistConn).writeLoop+0xe6	/usr/local/go/src/net/http/transport.go:2593
+#	0xdc2fe4	main.main.func7+0x1c4				/app/cmd/search/main.go:224
 
 1 @ 0x47beee 0x4592b7 0x775fe6 0x483f81
 #	0x775fe5	os/signal.NotifyContext.func1+0x65	/usr/local/go/src/os/signal/signal.go:289
 
-1 @ 0x47beee 0x4592b7 0xd041c5 0xd0402f 0x483f81
-#	0xd041c4	go.opentelemetry.io/otel/sdk/metric.(*PeriodicReader).run+0x124		/go/pkg/mod/go.opentelemetry.io/otel/sdk/metric@v1.38.0/periodic_reader.go:166
-#	0xd0402e	go.opentelemetry.io/otel/sdk/metric.NewPeriodicReader.func2+0x4e	/go/pkg/mod/go.opentelemetry.io/otel/sdk/metric@v1.38.0/periodic_reader.go:126
+1 @ 0x47beee 0x4592b7 0x8a2aef 0x483f81
+#	0x8a2aee	github.com/cockroachdb/pebble/vfs.(*diskHealthCheckingFS).startTickerLocked.func1+0xee	/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/vfs/disk_health.go:566
 
-1 @ 0x47beee 0x4592b7 0xd9b79a 0xd99231 0x483f81
-#	0xd9b799	go.opentelemetry.io/otel/sdk/trace.(*batchSpanProcessor).processQueue+0x119	/go/pkg/mod/go.opentelemetry.io/otel/sdk@v1.38.0/trace/batch_span_processor.go:390
-#	0xd99230	go.opentelemetry.io/otel/sdk/trace.NewBatchSpanProcessor.func2+0x50		/go/pkg/mod/go.opentelemetry.io/otel/sdk@v1.38.0/trace/batch_span_processor.go:145
+1 @ 0x47beee 0x4592b7 0xb04b08 0x483f81
+#	0xb04b07	plastic-engine-core/internal/core/search/segment.(*PebbleFSTRegistry).mergeWorker+0x147	/app/internal/core/search/segment/pebble_fst_registry.go:856
 
-1 @ 0x47beee 0x4592b7 0xdbca45 0x483f81
-#	0xdbca44	plastic-engine-core/internal/core/search.(*SearchNode).StartHeartbeat.func1+0xe4	/app/internal/core/search/node.go:130
+1 @ 0x47beee 0x4592b7 0xd05325 0xd0518f 0x483f81
+#	0xd05324	go.opentelemetry.io/otel/sdk/metric.(*PeriodicReader).run+0x124		/go/pkg/mod/go.opentelemetry.io/otel/sdk/metric@v1.38.0/periodic_reader.go:166
+#	0xd0518e	go.opentelemetry.io/otel/sdk/metric.NewPeriodicReader.func2+0x4e	/go/pkg/mod/go.opentelemetry.io/otel/sdk/metric@v1.38.0/periodic_reader.go:126
 
-1 @ 0x47beee 0x4592b7 0xdc18b7 0x446a0b 0x483f81
-#	0xdc18b6	main.main+0x19d6	/app/cmd/search/main.go:236
+1 @ 0x47beee 0x4592b7 0xd9c91a 0xd9a3b1 0x483f81
+#	0xd9c919	go.opentelemetry.io/otel/sdk/trace.(*batchSpanProcessor).processQueue+0x119	/go/pkg/mod/go.opentelemetry.io/otel/sdk@v1.38.0/trace/batch_span_processor.go:390
+#	0xd9a3b0	go.opentelemetry.io/otel/sdk/trace.NewBatchSpanProcessor.func2+0x50		/go/pkg/mod/go.opentelemetry.io/otel/sdk@v1.38.0/trace/batch_span_processor.go:145
+
+1 @ 0x47beee 0x4592b7 0xdbdbc5 0x483f81
+#	0xdbdbc4	plastic-engine-core/internal/core/search.(*SearchNode).StartHeartbeat.func1+0xe4	/app/internal/core/search/node.go:130
+
+1 @ 0x47beee 0x4592b7 0xdc2a57 0x446a0b 0x483f81
+#	0xdc2a56	main.main+0x19f6	/app/cmd/search/main.go:236
 #	0x446a0a	runtime.main+0x28a	/usr/local/go/src/runtime/proc.go:283
 
-1 @ 0x483f81
+1 @ 0x47beee 0x47d5f9 0x47d5d9 0x48dc65 0x9e6809 0x9e6804 0x7625cc 0x9e6190 0x483f81
+# labels: {"pebble":"wal-sync"}
+#	0x47d5d8	sync.runtime_notifyListWait+0x138					/usr/local/go/src/runtime/sema.go:597
+#	0x48dc64	sync.(*Cond).Wait+0x84							/usr/local/go/src/sync/cond.go:71
+#	0x9e6808	github.com/cockroachdb/pebble/record.(*flusherCond).Wait+0x668		/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/record/log_writer.go:204
+#	0x9e6803	github.com/cockroachdb/pebble/record.(*LogWriter).flushLoop+0x663	/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/record/log_writer.go:436
+#	0x7625cb	runtime/pprof.Do+0x8b							/usr/local/go/src/runtime/pprof/runtime.go:51
+#	0x9e618f	github.com/cockroachdb/pebble/record.NewLogWriter.func2+0x4f		/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/record/log_writer.go:355
 
-1 @ 0x51f566 0xa3c58f 0xa3b10b 0xa3a0f3 0xa8f9ef 0xa8ebb3 0xaa5d4f 0xaa4cc5 0xa7714d 0xaff13d 0xaff114 0xaf8276 0xaf881a 0xd7691b 0xd76dee 0xd7d69a 0xd7b997 0xd7b496 0xd7b238 0x483f81
-#	0x51f565	bytes.Compare+0x45										/usr/local/go/src/bytes/bytes.go:28
-#	0xa3c58e	github.com/cockroachdb/pebble/internal/arenaskl.(*Skiplist).findSpliceForLevel+0x10e		/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/arenaskl/skl.go:414
-#	0xa3b10a	github.com/cockroachdb/pebble/internal/arenaskl.(*Iterator).seekForBaseSplice+0x6a		/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/arenaskl/iterator.go:252
-#	0xa3a0f2	github.com/cockroachdb/pebble/internal/arenaskl.(*Iterator).SeekGE+0x92				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/internal/arenaskl/iterator.go:104
-#	0xa8f9ee	github.com/cockroachdb/pebble.(*getIter).Next+0xdce						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/get_iter.go:151
-#	0xa8ebb2	github.com/cockroachdb/pebble.(*getIter).First+0x12						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/get_iter.go:65
-#	0xaa5d4e	github.com/cockroachdb/pebble.(*Iterator).iterFirstWithinBounds+0xce				/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/iterator.go:2024
-#	0xaa4cc4	github.com/cockroachdb/pebble.(*Iterator).First+0xe4						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/iterator.go:1622
-#	0xa7714c	github.com/cockroachdb/pebble.(*DB).getInternal+0x3ac						/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/db.go:592
-#	0xaff13c	github.com/cockroachdb/pebble.(*DB).Get+0x1fc							/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/db.go:520
-#	0xaff113	plastic-engine-core/internal/core/search/segment.(*PebbleFSTRegistry).GetOrCreate+0x1d3		/app/internal/core/search/segment/pebble_fst_registry.go:276
-#	0xaf8275	plastic-engine-core/internal/core/search/segment.(*Manager).Index+0x95				/app/internal/core/search/segment/manager.go:282
-#	0xaf8819	plastic-engine-core/internal/core/search/segment.(*Manager).IndexDocument+0x279			/app/internal/core/search/segment/manager.go:328
-#	0xd7691a	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).Index+0x33a		/app/internal/core/search/document/segment_writer.go:81
-#	0xd76ded	plastic-engine-core/internal/core/search/document.(*SegmentIndexWriter).IndexBatch+0x1ad	/app/internal/core/search/document/segment_writer.go:95
-#	0xd7d699	plastic-engine-core/internal/core/search/document.(*ShardWorker).processBatch+0x6f9		/app/internal/core/search/document/worker.go:384
-#	0xd7b996	plastic-engine-core/internal/core/search/document.(*ShardWorker).processSwappedBatch+0x4d6	/app/internal/core/search/document/worker.go:210
-#	0xd7b495	plastic-engine-core/internal/core/search/document.(*ShardWorker).doFlush+0x115			/app/internal/core/search/document/worker.go:183
-#	0xd7b237	plastic-engine-core/internal/core/search/document.(*ShardWorker).flushLoop+0x117		/app/internal/core/search/document/worker.go:162
+1 @ 0x49d6e5 0x49ba78 0x4fa60e 0x4fa5f6 0x4fa491 0x5add25 0x5bd7c5 0x6ea5f7 0x483f81
+#	0x49d6e4	syscall.Syscall+0x24				/usr/local/go/src/syscall/syscall_linux.go:73
+#	0x49ba77	syscall.read+0x37				/usr/local/go/src/syscall/zsyscall_linux_amd64.go:736
+#	0x4fa60d	syscall.Read+0x2ad				/usr/local/go/src/syscall/syscall_unix.go:183
+#	0x4fa5f5	internal/poll.ignoringEINTRIO+0x295		/usr/local/go/src/internal/poll/fd_unix.go:745
+#	0x4fa490	internal/poll.(*FD).Read+0x130			/usr/local/go/src/internal/poll/fd_unix.go:161
+#	0x5add24	net.(*netFD).Read+0x24				/usr/local/go/src/net/fd_posix.go:55
+#	0x5bd7c4	net.(*conn).Read+0x44				/usr/local/go/src/net/net.go:194
+#	0x6ea5f6	net/http.(*connReader).backgroundRead+0x36	/usr/local/go/src/net/http/server.go:690
 

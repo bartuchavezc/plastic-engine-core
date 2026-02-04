@@ -333,20 +333,43 @@ func (m *Manager) Index(ctx context.Context, field, term, docID string, tf int, 
 }
 
 // IndexDocument indexes all terms for a document.
+// Assumes fieldTerms contains unique terms per field (pre-aggregated by tokenizer).
 func (m *Manager) IndexDocument(ctx context.Context, docID string, fieldTerms map[string][]TermPosting) error {
-	if m.closed.Load() {
-		return fmt.Errorf("manager is closed")
-	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	for field, terms := range fieldTerms {
 		for _, tp := range terms {
-			if err := m.Index(ctx, field, tp.Term, docID, tp.TF, tp.Positions); err != nil {
-				return err
+			termID, err := m.registry.GetOrCreate(ctx, field, tp.Term)
+			if err != nil {
+				return fmt.Errorf("get or create term: %w", err)
 			}
+
+			if _, err := m.wal.AppendIndex(wal.IndexOp{
+				TermID:    termID,
+				DocID:     docID,
+				TF:        tp.TF,
+				Positions: tp.Positions,
+				Field:     field,
+				Term:      tp.Term,
+			}); err != nil {
+				return fmt.Errorf("append to wal: %w", err)
+			}
+
+			m.registry.IncrementDF(termID, 1)
+			m.active.Add(termID, docID, tp.TF, tp.Positions)
 		}
 	}
 
-	m.registry.IncrementTotalDocs(1)
+	m.indexedDocs.Add(1)
+
+	if m.active.DocCount() >= m.config.FlushThreshold {
+		select {
+		case m.flushCh <- struct{}{}:
+		default:
+		}
+	}
+
 	return nil
 }
 
@@ -583,7 +606,9 @@ func (m *Manager) mergeSegments(segments []*DiskSegment, newLevel int) (*DiskSeg
 	}
 	defer func() {
 		for _, iter := range iters {
-			iter.Close()
+			if iter != nil {
+				iter.Close()
+			}
 		}
 	}()
 
