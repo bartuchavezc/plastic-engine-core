@@ -266,7 +266,8 @@ func TestTermRegistry(t *testing.T) {
 
 	reg, err := segment.NewFSTTermRegistry(segment.FSTRegistryConfig{
 		DataDir:          dir,
-		RebuildThreshold: 100,
+		RebuildThreshold: 10000,
+		RebuildCooldown:  4,
 	})
 	if err != nil {
 		t.Fatalf("NewFSTTermRegistry: %v", err)

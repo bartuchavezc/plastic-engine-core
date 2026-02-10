@@ -1,6 +1,7 @@
 package segment
 
 import (
+	"container/heap"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,34 @@ import (
 
 	"plastic-engine-core/internal/core/search/wal"
 )
+
+// mergeHeapItem represents a term from one segment in the merge heap.
+type mergeHeapItem struct {
+	termID   string
+	postings []Posting
+	df       int64
+	iterIdx  int // which iterator this came from
+}
+
+// mergeHeap implements heap.Interface for k-way merge.
+type mergeHeap []*mergeHeapItem
+
+func (h mergeHeap) Len() int           { return len(h) }
+func (h mergeHeap) Less(i, j int) bool { return h[i].termID < h[j].termID }
+func (h mergeHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+func (h *mergeHeap) Push(x any) {
+	*h = append(*h, x.(*mergeHeapItem))
+}
+
+func (h *mergeHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	old[n-1] = nil // avoid memory leak
+	*h = old[0 : n-1]
+	return item
+}
 
 // Manager orchestrates segments, handling indexing, searching, and merging.
 type Manager struct {
@@ -589,7 +618,8 @@ func (m *Manager) doMerge() {
 	}
 }
 
-// mergeSegments merges multiple segments into one.
+// mergeSegments merges multiple segments into one using streaming k-way merge.
+// This uses O(K) memory where K is the number of segments, instead of O(N) where N is total postings.
 func (m *Manager) mergeSegments(segments []*DiskSegment, newLevel int) (*DiskSegment, error) {
 	newID := fmt.Sprintf("merged_%d", time.Now().UnixNano())
 	segmentDir := filepath.Join(m.config.DataDir, "segments")
@@ -612,45 +642,41 @@ func (m *Manager) mergeSegments(segments []*DiskSegment, newLevel int) (*DiskSeg
 		}
 	}()
 
-	// K-way merge
+	// Count total docs
 	totalDocs := 0
 	for _, seg := range segments {
 		totalDocs += seg.DocCount()
 	}
 
-	// Simple approach: collect all terms, sort, merge
-	allTerms := make(map[string][]Posting)
-	allDF := make(map[string]int64)
+	// Initialize min-heap with first term from each iterator
+	h := &mergeHeap{}
+	heap.Init(h)
 
 	for i, iter := range iters {
-		for iter.Next() {
-			termID := iter.Term()
-			postings := iter.Postings()
-			df := iter.DF()
-
-			existing := allTerms[termID]
-			existing = append(existing, postings...)
-			allTerms[termID] = existing
-			allDF[termID] += df
+		if iter.Next() {
+			heap.Push(h, &mergeHeapItem{
+				termID:   iter.Term(),
+				postings: iter.Postings(),
+				df:       iter.DF(),
+				iterIdx:  i,
+			})
 		}
-		iters[i] = nil // Allow GC
 	}
 
-	// Sort term IDs
-	termIDs := make([]string, 0, len(allTerms))
-	for termID := range allTerms {
-		termIDs = append(termIDs, termID)
-	}
-	sort.Strings(termIDs)
+	// Streaming k-way merge
+	termCount := 0
+	var currentTermID string
+	var currentPostings []Posting
+	var currentDF int64
 
-	// Write merged terms
-	for _, termID := range termIDs {
-		postings := allTerms[termID]
-		df := allDF[termID]
+	flushCurrentTerm := func() error {
+		if currentTermID == "" || len(currentPostings) == 0 {
+			return nil
+		}
 
 		// Deduplicate postings by doc ID (keep latest)
-		postingMap := make(map[string]Posting)
-		for _, p := range postings {
+		postingMap := make(map[string]Posting, len(currentPostings))
+		for _, p := range currentPostings {
 			postingMap[p.DocID] = p
 		}
 
@@ -659,17 +685,56 @@ func (m *Manager) mergeSegments(segments []*DiskSegment, newLevel int) (*DiskSeg
 			dedupedPostings = append(dedupedPostings, p)
 		}
 
-		if err := writer.AddTerm(termID, dedupedPostings, df); err != nil {
-			writer.Abort()
-			return nil, err
+		if err := writer.AddTerm(currentTermID, dedupedPostings, currentDF); err != nil {
+			return err
 		}
+		termCount++
+
+		// Reset for next term
+		currentPostings = currentPostings[:0]
+		currentDF = 0
+		return nil
+	}
+
+	for h.Len() > 0 {
+		item := heap.Pop(h).(*mergeHeapItem)
+
+		// If new term, flush previous and start new
+		if item.termID != currentTermID {
+			if err := flushCurrentTerm(); err != nil {
+				writer.Abort()
+				return nil, err
+			}
+			currentTermID = item.termID
+		}
+
+		// Accumulate postings for current term
+		currentPostings = append(currentPostings, item.postings...)
+		currentDF += item.df
+
+		// Advance the iterator that gave us this item
+		iter := iters[item.iterIdx]
+		if iter.Next() {
+			heap.Push(h, &mergeHeapItem{
+				termID:   iter.Term(),
+				postings: iter.Postings(),
+				df:       iter.DF(),
+				iterIdx:  item.iterIdx,
+			})
+		}
+	}
+
+	// Flush last term
+	if err := flushCurrentTerm(); err != nil {
+		writer.Abort()
+		return nil, err
 	}
 
 	// Set metadata
 	writer.SetMeta(SegmentMeta{
 		ID:        newID,
 		DocCount:  totalDocs,
-		TermCount: len(termIDs),
+		TermCount: termCount,
 		CreatedAt: time.Now().UTC(),
 		Level:     newLevel,
 	})

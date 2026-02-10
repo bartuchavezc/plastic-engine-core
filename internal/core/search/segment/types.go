@@ -139,8 +139,8 @@ type Config struct {
 // DefaultConfig returns sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		FlushThreshold:      1000,
-		MaxSegmentsPerLevel: 5,
+		FlushThreshold:      5000, // 5k docs before flush (periodic flush every 5s handles low-load cases)
+		MaxSegmentsPerLevel: 5,    // Keep low for search performance (merge consolidates segments)
 		LevelSizeMultiplier: 10,
 		DataDir:             "segments",
 		FSTRebuildThreshold: 1000,

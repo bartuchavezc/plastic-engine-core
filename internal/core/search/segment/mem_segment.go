@@ -26,7 +26,7 @@ type MemSegment struct {
 type memPostingList struct {
 	termID   string
 	postings []Posting
-	docSet   map[string]bool // For deduplication
+	// Removed docSet map - use linear search instead (postings are usually small per term)
 }
 
 // NewMemSegment creates a new in-memory segment.
@@ -72,30 +72,30 @@ func (s *MemSegment) Add(termID, docID string, tf int, positions []int) {
 	if !ok {
 		pl = &memPostingList{
 			termID:   termID,
-			postings: make([]Posting, 0, 16),
-			docSet:   make(map[string]bool),
+			postings: make([]Posting, 0, 8),
 		}
 		s.postings[termID] = pl
 	}
 
-	// Check if this doc already has a posting for this term
-	if pl.docSet[docID] {
-		// Update existing posting
-		for i := range pl.postings {
-			if pl.postings[i].DocID == docID {
-				pl.postings[i].TF = tf
-				pl.postings[i].Positions = positions
-				break
-			}
+	// Check if this doc already has a posting for this term (linear search - usually small)
+	found := false
+	for i := range pl.postings {
+		if pl.postings[i].DocID == docID {
+			// Update existing posting
+			pl.postings[i].TF = tf
+			pl.postings[i].Positions = positions
+			found = true
+			break
 		}
-	} else {
+	}
+
+	if !found {
 		// Add new posting
 		pl.postings = append(pl.postings, Posting{
 			DocID:     docID,
 			TF:        tf,
 			Positions: positions,
 		})
-		pl.docSet[docID] = true
 		s.termDF[termID]++
 	}
 
@@ -170,6 +170,8 @@ func (s *MemSegment) Close() error {
 }
 
 // Iterator returns an iterator over all terms in sorted order.
+// NOTE: The caller must ensure the MemSegment is not modified during iteration.
+// This is safe in the flush path because the segment is swapped atomically before iteration.
 func (s *MemSegment) Iterator() SegmentIterator {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -181,16 +183,11 @@ func (s *MemSegment) Iterator() SegmentIterator {
 	}
 	sort.Strings(termIDs)
 
-	// Build snapshot of postings
-	snapshot := make(map[string]memPostingList, len(s.postings))
+	// OPTIMIZATION: No deep copy needed - the MemSegment is swapped before iteration
+	// so it won't be modified. Just keep references to the posting lists.
+	postingsRef := make(map[string]*memPostingList, len(s.postings))
 	for termID, pl := range s.postings {
-		// Deep copy postings
-		postingsCopy := make([]Posting, len(pl.postings))
-		copy(postingsCopy, pl.postings)
-		snapshot[termID] = memPostingList{
-			termID:   termID,
-			postings: postingsCopy,
-		}
+		postingsRef[termID] = pl
 	}
 
 	dfSnapshot := make(map[string]int64, len(s.termDF))
@@ -199,19 +196,19 @@ func (s *MemSegment) Iterator() SegmentIterator {
 	}
 
 	return &memSegmentIterator{
-		termIDs:  termIDs,
-		postings: snapshot,
-		df:       dfSnapshot,
-		pos:      -1,
+		termIDs:     termIDs,
+		postingsRef: postingsRef,
+		df:          dfSnapshot,
+		pos:         -1,
 	}
 }
 
 // memSegmentIterator iterates over a memory segment.
 type memSegmentIterator struct {
-	termIDs  []string
-	postings map[string]memPostingList
-	df       map[string]int64
-	pos      int
+	termIDs     []string
+	postingsRef map[string]*memPostingList // References, not copies
+	df          map[string]int64
+	pos         int
 }
 
 func (it *memSegmentIterator) Next() bool {
@@ -231,7 +228,7 @@ func (it *memSegmentIterator) Postings() []Posting {
 		return nil
 	}
 	termID := it.termIDs[it.pos]
-	if pl, ok := it.postings[termID]; ok {
+	if pl, ok := it.postingsRef[termID]; ok {
 		return pl.postings
 	}
 	return nil

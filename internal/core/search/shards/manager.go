@@ -129,7 +129,7 @@ func (m *Manager) ensureLocalShard(assignment Assignment) error {
 		// Reopen segment manager if it's closed (e.g., after restart)
 		if existing.Segments == nil {
 			segmentMgr, err := segment.NewManager(segment.Config{
-				FlushThreshold:      1000,
+				FlushThreshold:      5000,
 				MaxSegmentsPerLevel: 5,
 				LevelSizeMultiplier: 10,
 				DataDir:             m.shardPath(assignment.ID),
@@ -165,7 +165,7 @@ func (m *Manager) openShard(assignment Assignment) error {
 	}
 
 	segmentMgr, err := segment.NewManager(segment.Config{
-		FlushThreshold:      1000,
+		FlushThreshold:      5000,
 		MaxSegmentsPerLevel: 5,
 		LevelSizeMultiplier: 10,
 		DataDir:             shardPath,
@@ -342,7 +342,7 @@ func (m *Manager) loadExistingShards() error {
 		}
 
 		segmentMgr, err := segment.NewManager(segment.Config{
-			FlushThreshold:      1000,
+			FlushThreshold:      5000,
 			MaxSegmentsPerLevel: 5,
 			LevelSizeMultiplier: 10,
 			DataDir:             shardPath,

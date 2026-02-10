@@ -446,43 +446,123 @@ func (c *Coordinator) ListIndexes(ctx context.Context) ([]indexes.IndexDefinitio
 	return defs, nil
 }
 
-const defaultShardAssignmentBatch = 32
-
 func (c *Coordinator) assignPendingShardsToReadyNodes(ctx context.Context) error {
+	// Get all eligible nodes
 	eligibleNodes, err := c.nodesSvc.ListEligible(ctx)
 	if err != nil {
 		return err
 	}
 
 	if len(eligibleNodes) == 0 {
+		c.log.Debug("no eligible nodes for shard assignment")
 		return nil
 	}
 
+	// Get all pending shards
+	pendingShards, err := c.shardsSvc.ListPendingShards(ctx)
+	if err != nil {
+		return err
+	}
+
+	if len(pendingShards) == 0 {
+		c.log.Debug("no pending shards to assign")
+		return nil
+	}
+
+	// Get current shard counts per node
+	shardCounts, err := c.shardsSvc.GetNodeShardCounts(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Initialize counts for nodes with no shards yet
 	for _, node := range eligibleNodes {
-		assignments, err := c.shardsSvc.AssignToNode(ctx, node.ID, defaultShardAssignmentBatch)
-		if err != nil {
-			return err
+		if _, exists := shardCounts[node.ID]; !exists {
+			shardCounts[node.ID] = 0
+		}
+	}
+
+	c.log.Info("distributing shards across nodes",
+		logger.Field{Key: "pending_shards", Value: len(pendingShards)},
+		logger.Field{Key: "eligible_nodes", Value: len(eligibleNodes)},
+	)
+
+	// Track assignments per node to batch notifications
+	nodeAssignments := make(map[string][]searchshards.Assignment)
+
+	// Distribute shards using least-loaded strategy
+	for _, pending := range pendingShards {
+		// Find the node with the least shards (least-loaded)
+		var selectedNode nodes.NodeRecord
+		minShards := -1
+		for _, node := range eligibleNodes {
+			count := shardCounts[node.ID]
+			if minShards == -1 || count < minShards {
+				minShards = count
+				selectedNode = node
+			}
 		}
 
-		if len(assignments) > 0 {
-			c.log.Info("assigned shards to node",
-				logger.Field{Key: "node_id", Value: node.ID},
-				logger.Field{Key: "count", Value: len(assignments)},
+		// Assign the shard to the selected node
+		if err := c.shardsSvc.AssignShardToNode(ctx, pending.ID, selectedNode.ID); err != nil {
+			c.log.Error("failed to assign shard to node",
+				logger.Field{Key: "shard_id", Value: pending.ID},
+				logger.Field{Key: "node_id", Value: selectedNode.ID},
+				logger.Field{Key: "error", Value: err},
 			)
+			continue
+		}
 
-			// Enrich assignments with index metadata before notifying
-			enrichedAssignments, err := c.enrichAssignments(ctx, assignments)
-			if err != nil {
-				c.log.Error("failed to enrich assignments for notification",
-					logger.Field{Key: "node_id", Value: node.ID},
+		// Update local count for next iteration
+		shardCounts[selectedNode.ID]++
+
+		// Build assignment for notification
+		assignment := searchshards.Assignment{
+			ID:             pending.ID,
+			IndexID:        pending.IndexID,
+			ShardKey:       pending.ShardKey,
+			Primary:        true,
+			Analyzer:       pending.Analyzer,
+			Tokenizer:      pending.Tokenizer,
+			MappingVersion: pending.MappingVersion,
+		}
+		nodeAssignments[selectedNode.ID] = append(nodeAssignments[selectedNode.ID], assignment)
+
+		c.log.Debug("assigned shard to node",
+			logger.Field{Key: "shard_id", Value: pending.ID},
+			logger.Field{Key: "node_id", Value: selectedNode.ID},
+			logger.Field{Key: "node_shard_count", Value: shardCounts[selectedNode.ID]},
+		)
+	}
+
+	// Notify each node about their new assignments
+	for nodeID, assignments := range nodeAssignments {
+		if len(assignments) == 0 {
+			continue
+		}
+
+		// Enrich assignments with full index metadata
+		enrichedAssignments, err := c.enrichAssignments(ctx, assignments)
+		if err != nil {
+			c.log.Error("failed to enrich assignments for notification",
+				logger.Field{Key: "node_id", Value: nodeID},
+				logger.Field{Key: "error", Value: err},
+			)
+			continue
+		}
+
+		c.log.Info("assigned shards to node",
+			logger.Field{Key: "node_id", Value: nodeID},
+			logger.Field{Key: "count", Value: len(enrichedAssignments)},
+		)
+
+		// Push assignments to the search node
+		if c.shardsNotifier != nil {
+			if err := c.shardsNotifier.NotifyNode(ctx, nodeID, enrichedAssignments); err != nil {
+				c.log.Error("failed to notify node of assignments",
+					logger.Field{Key: "node_id", Value: nodeID},
 					logger.Field{Key: "error", Value: err},
 				)
-				continue
-			}
-
-			// Push assignments to the search node
-			if c.shardsNotifier != nil {
-				_ = c.shardsNotifier.NotifyNode(ctx, node.ID, enrichedAssignments)
 			}
 		}
 	}

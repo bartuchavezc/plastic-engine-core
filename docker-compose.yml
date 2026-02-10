@@ -54,6 +54,14 @@ services:
       - OTEL_EXPORTER_OTLP_INSECURE=true
     volumes:
       - search-1-data:/app/data
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
       interval: 10s
@@ -86,6 +94,14 @@ services:
       - OTEL_EXPORTER_OTLP_INSECURE=true
     volumes:
       - search-2-data:/app/data
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
       interval: 10s

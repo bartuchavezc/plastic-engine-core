@@ -273,3 +273,92 @@ func buildAssignment(shardID, indexID, shardKey, analyzer, tokenizer string, map
 	}
 }
 
+// PendingShard represents a shard waiting to be assigned.
+type PendingShard struct {
+	ID             string
+	IndexID        string
+	ShardKey       string
+	Analyzer       string
+	Tokenizer      string
+	MappingVersion int
+}
+
+// ListPendingShards returns all shards that have not been assigned to a node.
+func (r *Repository) ListPendingShards(ctx context.Context) ([]PendingShard, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT s.id, s.index_id, s.shard_key, i.default_analyzer, i.default_tokenizer, i.mapping_version
+		FROM shards s
+		INNER JOIN indexes i ON i.id = s.index_id
+		WHERE s.primary_node IS NULL
+		ORDER BY s.created_at ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("query pending shards: %w", err)
+	}
+	defer rows.Close()
+
+	var shards []PendingShard
+	for rows.Next() {
+		var s PendingShard
+		if err := rows.Scan(&s.ID, &s.IndexID, &s.ShardKey, &s.Analyzer, &s.Tokenizer, &s.MappingVersion); err != nil {
+			return nil, fmt.Errorf("scan pending shard: %w", err)
+		}
+		shards = append(shards, s)
+	}
+
+	return shards, rows.Err()
+}
+
+// NodeShardCount represents the number of shards assigned to a node.
+type NodeShardCount struct {
+	NodeID     string
+	ShardCount int
+}
+
+// GetNodeShardCounts returns the number of shards assigned to each node.
+func (r *Repository) GetNodeShardCounts(ctx context.Context) (map[string]int, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT primary_node, COUNT(*) as shard_count
+		FROM shards
+		WHERE primary_node IS NOT NULL
+		GROUP BY primary_node`)
+	if err != nil {
+		return nil, fmt.Errorf("query node shard counts: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int)
+	for rows.Next() {
+		var nodeID string
+		var count int
+		if err := rows.Scan(&nodeID, &count); err != nil {
+			return nil, fmt.Errorf("scan node shard count: %w", err)
+		}
+		counts[nodeID] = count
+	}
+
+	return counts, rows.Err()
+}
+
+// AssignShardToNode assigns a specific shard to a specific node.
+func (r *Repository) AssignShardToNode(ctx context.Context, shardID, nodeID string) error {
+	now := time.Now().UTC().Format(DefaultTimestampFormat)
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE shards
+		SET primary_node = ?, state = 'assigned', updated_at = ?
+		WHERE id = ? AND primary_node IS NULL`,
+		nodeID, now, shardID)
+	if err != nil {
+		return fmt.Errorf("assign shard %s to node %s: %w", shardID, nodeID, err)
+	}
+
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("shard %s already assigned or not found", shardID)
+	}
+
+	return nil
+}
+

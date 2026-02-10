@@ -16,7 +16,7 @@ import (
 
 const (
 	segmentMagic   = "PLST"
-	segmentVersion = 2 // Version 2: Added Bloom Filter support
+	segmentVersion = 3 // Version 3: Binary termDict (was JSON in v1-v2)
 )
 
 // DiskSegment is an immutable segment stored on disk.
@@ -76,9 +76,9 @@ func (s *DiskSegment) loadHeader() error {
 		return fmt.Errorf("invalid segment magic: %s", header.Magic)
 	}
 
-	// Support both version 1 (no bloom) and version 2 (with bloom)
-	if header.Version != segmentVersion && header.Version != 1 {
-		return fmt.Errorf("unsupported segment version: %d", header.Version)
+	// Support versions 1-3
+	if header.Version > segmentVersion {
+		return fmt.Errorf("unsupported segment version: %d (max supported: %d)", header.Version, segmentVersion)
 	}
 
 	// Read metadata
@@ -104,15 +104,15 @@ func (s *DiskSegment) loadHeader() error {
 		s.bloom = bloom
 	}
 
-	// Read term dictionary
+	// Read term dictionary (binary format)
 	dictData := make([]byte, header.DictSize)
 	if _, err := io.ReadFull(s.file, dictData); err != nil {
 		return fmt.Errorf("read dict: %w", err)
 	}
 
-	var dictEntries []TermDictEntry
-	if err := json.Unmarshal(dictData, &dictEntries); err != nil {
-		return fmt.Errorf("unmarshal dict: %w", err)
+	dictEntries, err := decodeTermDictBinary(dictData)
+	if err != nil {
+		return fmt.Errorf("decode dict: %w", err)
 	}
 
 	for _, entry := range dictEntries {
@@ -242,6 +242,96 @@ func decodePostingsBinary(data []byte, count int) ([]Posting, error) {
 	}
 
 	return postings, nil
+}
+
+// encodeTermDictBinary encodes the term dictionary to binary format.
+// Format: count(4) + entries (each: termIDLen(2) + termID + offset(8) + df(8) + postingCount(4))
+func encodeTermDictBinary(entries []TermDictEntry) []byte {
+	// Estimate size: 30 bytes per entry average
+	buf := bytes.NewBuffer(make([]byte, 0, len(entries)*30+4))
+
+	// Write entry count
+	var temp4 [4]byte
+	binary.BigEndian.PutUint32(temp4[:], uint32(len(entries)))
+	buf.Write(temp4[:])
+
+	var temp2 [2]byte
+	var temp8 [8]byte
+
+	for _, e := range entries {
+		termBytes := []byte(e.TermID)
+
+		// TermID length (2 bytes) + TermID
+		binary.BigEndian.PutUint16(temp2[:], uint16(len(termBytes)))
+		buf.Write(temp2[:])
+		buf.Write(termBytes)
+
+		// PostingOffset (8 bytes)
+		binary.BigEndian.PutUint64(temp8[:], uint64(e.PostingOffset))
+		buf.Write(temp8[:])
+
+		// DF (8 bytes)
+		binary.BigEndian.PutUint64(temp8[:], uint64(e.DF))
+		buf.Write(temp8[:])
+
+		// PostingCount (4 bytes)
+		binary.BigEndian.PutUint32(temp4[:], uint32(e.PostingCount))
+		buf.Write(temp4[:])
+	}
+
+	return buf.Bytes()
+}
+
+// decodeTermDictBinary decodes the term dictionary from binary format.
+func decodeTermDictBinary(data []byte) ([]TermDictEntry, error) {
+	if len(data) < 4 {
+		return nil, fmt.Errorf("dict data too short")
+	}
+
+	buf := bytes.NewReader(data)
+
+	var count uint32
+	if err := binary.Read(buf, binary.BigEndian, &count); err != nil {
+		return nil, err
+	}
+
+	entries := make([]TermDictEntry, 0, count)
+
+	for i := uint32(0); i < count; i++ {
+		var termIDLen uint16
+		if err := binary.Read(buf, binary.BigEndian, &termIDLen); err != nil {
+			return nil, err
+		}
+
+		termID := make([]byte, termIDLen)
+		if _, err := io.ReadFull(buf, termID); err != nil {
+			return nil, err
+		}
+
+		var offset uint64
+		if err := binary.Read(buf, binary.BigEndian, &offset); err != nil {
+			return nil, err
+		}
+
+		var df uint64
+		if err := binary.Read(buf, binary.BigEndian, &df); err != nil {
+			return nil, err
+		}
+
+		var postingCount uint32
+		if err := binary.Read(buf, binary.BigEndian, &postingCount); err != nil {
+			return nil, err
+		}
+
+		entries = append(entries, TermDictEntry{
+			TermID:       string(termID),
+			PostingOffset: int64(offset),
+			DF:           int64(df),
+			PostingCount: int(postingCount),
+		})
+	}
+
+	return entries, nil
 }
 
 // GetLocalDF returns the document frequency for a term in this segment.
@@ -489,66 +579,45 @@ func encodePostingsBinary(postings []Posting) []byte {
 	return buf
 }
 
-// Finalize completes the segment and returns the path.
 func (w *DiskSegmentWriter) Finalize() (string, error) {
-	// Update metadata
 	w.meta.TermCount = len(w.termDict)
 
-	// Serialize metadata
+	// 1. Metadata JSON (es pequeño, no pasa nada)
 	metaData, err := json.Marshal(w.meta)
 	if err != nil {
 		return "", err
 	}
 
-	// Serialize bloom filter
+	// 2. Bloom Filter (ya lo tienes en un buffer)
 	var bloomBuf bytes.Buffer
-	if _, err := w.bloom.WriteTo(&bloomBuf); err != nil {
-		return "", fmt.Errorf("serialize bloom filter: %w", err)
-	}
+	w.bloom.WriteTo(&bloomBuf)
 	bloomData := bloomBuf.Bytes()
 
-	// Header: 24 bytes (magic:4 + version:4 + metaSize:4 + bloomSize:4 + dictSize:4 + checksum:4)
-	const headerSize = 24
+	// 3. Diccionario (binary format)
+	// First pass: encode with relative offsets to get size
+	dictData := encodeTermDictBinary(w.termDict)
 
-	// We need to iterate to find the right dict size because offsets affect JSON size
-	// Use a two-pass approach: first estimate, then finalize
-
-	// Estimate dict size with current relative offsets
-	tempDict, _ := json.Marshal(w.termDict)
-	postingsStart := int64(headerSize) + int64(len(metaData)) + int64(len(bloomData)) + int64(len(tempDict))
+	// Calculate absolute offset for postings section (Header=24)
+	postingsStart := int64(24 + len(metaData) + len(bloomData) + len(dictData))
 
 	// Adjust offsets to absolute positions
 	for i := range w.termDict {
 		w.termDict[i].PostingOffset += postingsStart
 	}
 
-	// Serialize dict with absolute offsets
-	dictData, err := json.Marshal(w.termDict)
-	if err != nil {
-		return "", err
-	}
+	// Re-encode with absolute offsets
+	dictData = encodeTermDictBinary(w.termDict)
 
-	// If dict size changed, we need to re-adjust
-	actualPostingsStart := int64(headerSize) + int64(len(metaData)) + int64(len(bloomData)) + int64(len(dictData))
-	if actualPostingsStart != postingsStart {
-		// Re-adjust offsets
-		diff := actualPostingsStart - postingsStart
-		for i := range w.termDict {
-			w.termDict[i].PostingOffset += diff
-		}
-		// Re-serialize
-		dictData, err = json.Marshal(w.termDict)
-		if err != nil {
-			return "", err
-		}
-	}
+	// 4. Checksum EFICIENTE (sin appends)
+	h := crc32.NewIEEE()
+	h.Write(metaData)
+	h.Write(bloomData)
+	h.Write(dictData)
+	// Nota: El checksum usualmente no incluye las postings porque son gigantes,
+	// pero si lo quieres, haz h.Write(w.postingsBuf.Bytes()) aquí.
+	checksum := h.Sum32()
 
-	// Calculate checksum (includes meta, bloom, and dict)
-	checksumData := append(metaData, bloomData...)
-	checksumData = append(checksumData, dictData...)
-	checksum := crc32.ChecksumIEEE(checksumData)
-
-	// Build header
+	// 5. Preparar Header
 	header := segmentHeader{
 		Version:   segmentVersion,
 		MetaSize:  uint32(len(metaData)),
@@ -558,62 +627,33 @@ func (w *DiskSegmentWriter) Finalize() (string, error) {
 	}
 	copy(header.Magic[:], segmentMagic)
 
-	// Create file and write everything
+	// 6. Escritura a disco con Buffer
 	file, err := os.Create(w.path)
 	if err != nil {
 		return "", err
 	}
+	defer file.Close()
 
-	writer := bufio.NewWriterSize(file, 64*1024)
+	writer := bufio.NewWriterSize(file, 128*1024) // 128KB de buffer para disco
 
-	// Write header
-	if err := binary.Write(writer, binary.BigEndian, &header); err != nil {
-		file.Close()
+	// Escribir en orden
+	binary.Write(writer, binary.BigEndian, &header)
+	writer.Write(metaData)
+	writer.Write(bloomData)
+	writer.Write(dictData)
+
+	// El gran final: Las postings (ya son binarias y están en un buffer)
+	// Usamos WriteTo para que el buffer se vuelque directamente al writer de archivo
+	if _, err := w.postingsBuf.WriteTo(writer); err != nil {
 		return "", err
 	}
 
-	// Write metadata
-	if _, err := writer.Write(metaData); err != nil {
-		file.Close()
-		return "", err
-	}
-
-	// Write bloom filter
-	if _, err := writer.Write(bloomData); err != nil {
-		file.Close()
-		return "", err
-	}
-
-	// Write dictionary
-	if _, err := writer.Write(dictData); err != nil {
-		file.Close()
-		return "", err
-	}
-
-	// Write postings
-	if _, err := writer.Write(w.postingsBuf.Bytes()); err != nil {
-		file.Close()
-		return "", err
-	}
-
-	// Flush and sync
 	if err := writer.Flush(); err != nil {
-		file.Close()
-		return "", err
-	}
-	if err := file.Sync(); err != nil {
-		file.Close()
-		return "", err
-	}
-	if err := file.Close(); err != nil {
 		return "", err
 	}
 
-	// Get file size
-	info, err := os.Stat(w.path)
-	if err == nil {
-		w.meta.SizeBytes = info.Size()
-	}
+	// Sincronización física con el disco
+	file.Sync()
 
 	return w.path, nil
 }

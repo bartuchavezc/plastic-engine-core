@@ -157,3 +157,18 @@ func (s *Service) LookupPrimary(ctx context.Context, indexID, shardKey string) (
 func (s *Service) LookupNode(ctx context.Context, nodeID string) (NodeInfo, error) {
 	return s.repo.LookupNode(ctx, nodeID)
 }
+
+// ListPendingShards returns all shards that have not been assigned to a node.
+func (s *Service) ListPendingShards(ctx context.Context) ([]PendingShard, error) {
+	return s.repo.ListPendingShards(ctx)
+}
+
+// GetNodeShardCounts returns the number of shards assigned to each node.
+func (s *Service) GetNodeShardCounts(ctx context.Context) (map[string]int, error) {
+	return s.repo.GetNodeShardCounts(ctx)
+}
+
+// AssignShardToNode assigns a specific shard to a specific node.
+func (s *Service) AssignShardToNode(ctx context.Context, shardID, nodeID string) error {
+	return s.repo.AssignShardToNode(ctx, shardID, nodeID)
+}

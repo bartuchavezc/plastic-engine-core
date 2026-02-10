@@ -21,6 +21,11 @@ var (
 
 	// ErrBackpressure indicates the shard queue is full.
 	ErrBackpressure = errors.New("indexer backpressure: shard queue full")
+
+	// globalFlushSema limits concurrent flush operations across all shards.
+	// This prevents Pebble lock contention when many shards flush simultaneously.
+	// Value of 2 allows some parallelism while avoiding excessive contention.
+	globalFlushSema = make(chan struct{}, 2)
 )
 
 // ShardWorkerConfig controls concurrency and queueing for a shard.
@@ -188,6 +193,10 @@ func (w *ShardWorker) processSwappedBatch(batch []batchedItem) {
 	if len(batch) == 0 {
 		return
 	}
+
+	// Acquire global flush semaphore to limit Pebble contention
+	globalFlushSema <- struct{}{}
+	defer func() { <-globalFlushSema }()
 
 	batchSize := len(batch)
 

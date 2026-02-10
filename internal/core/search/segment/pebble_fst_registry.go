@@ -57,6 +57,10 @@ type PebbleFSTRegistry struct {
 	// Dirty flag for metadata (saves CPU by batching metadata writes)
 	metaDirty atomic.Bool
 
+	// Batched DF increments (reduces Pebble writes dramatically)
+	dfBatch   map[string]int64
+	dfBatchMu sync.Mutex
+
 	// Paths
 	dataDir    string
 	fstPath    string
@@ -176,6 +180,7 @@ func NewPebbleFSTRegistry(config PebbleFSTConfig) (*PebbleFSTRegistry, error) {
 		pebblePath:  pebblePath,
 		mergeConfig: config.MergeConfig,
 		closeCh:     make(chan struct{}),
+		dfBatch:     make(map[string]int64, 10000), // Pre-allocate for common terms
 	}
 
 	// Load existing FST if present
@@ -282,18 +287,43 @@ func (r *PebbleFSTRegistry) Get(ctx context.Context, field, term string) (string
 	return "", false
 }
 
+var termKeyPool = sync.Pool{
+	New: func() any {
+		// Pre-alocamos 128 bytes, suficiente para casi cualquier field+term
+		b := make([]byte, 128)
+		return &b
+	},
+}
+
 // GetOrCreate retrieves an existing term or creates a new one.
 func (r *PebbleFSTRegistry) GetOrCreate(ctx context.Context, field, term string) (string, error) {
-	// Fast path: check if exists
-	if termID, found := r.Get(ctx, field, term); found {
-		return termID, nil
+
+	// 1. Único chequeo del FST (Memoria)
+	r.fstMu.RLock()
+	fst := r.fst
+	r.fstMu.RUnlock()
+	if fst != nil {
+		fstKey := field + "\x00" + term // Podrías optimizar esto luego con un buffer
+		if val, exists, _ := fst.Get([]byte(fstKey)); exists {
+			return formatTermID(val), nil
+		}
 	}
 
 	// Slow path: create new term in Pebble
-	pebbleKey := makeTermKey(field, term)
+	// pebbleKey := makeTermKey(field, term)
+	// 1. Pedimos un buffer prestado
+	bufPtr := termKeyPool.Get().(*[]byte)
+	defer termKeyPool.Put(bufPtr)
+
+	buf := (*bufPtr)[:0] // Reset del tamaño a 0, pero mantiene la capacidad
+	// 2. Construimos la llave sin 'make'
+	buf = append(buf, 't', ':')
+	buf = append(buf, field...)
+	buf = append(buf, 0)
+	buf = append(buf, term...)
 
 	// Double-check with Pebble (another goroutine might have created it)
-	val, closer, err := r.pebble.Get(pebbleKey)
+	val, closer, err := r.pebble.Get(buf)
 	if err == nil {
 		defer closer.Close()
 		return string(val), nil
@@ -304,7 +334,7 @@ func (r *PebbleFSTRegistry) GetOrCreate(ctx context.Context, field, term string)
 	termID := formatTermID(counter)
 
 	// Write to Pebble
-	if err := r.pebble.Set(pebbleKey, []byte(termID), pebbledb.NoSync); err != nil {
+	if err := r.pebble.Set(buf, []byte(termID), pebbledb.NoSync); err != nil {
 		return "", fmt.Errorf("write term to pebble: %w", err)
 	}
 
@@ -333,20 +363,52 @@ func (r *PebbleFSTRegistry) CreateAlias(field, newTerm, existingTermID string) e
 
 // GetDF returns the document frequency for a term.
 func (r *PebbleFSTRegistry) GetDF(termID string) int64 {
+	// Get persisted value from Pebble
+	var persisted int64
 	dfKey := makeDFKey(termID)
 	val, closer, err := r.pebble.Get(dfKey)
-	if err != nil {
-		return 0
+	if err == nil {
+		persisted = decodeInt64(val)
+		closer.Close()
 	}
-	defer closer.Close()
-	return decodeInt64(val)
+
+	// Add pending batch value (not yet flushed)
+	r.dfBatchMu.Lock()
+	pending := r.dfBatch[termID]
+	r.dfBatchMu.Unlock()
+
+	return persisted + pending
 }
 
 // IncrementDF atomically increments the document frequency.
+// Uses batching to reduce Pebble writes - flushes periodically in background.
 func (r *PebbleFSTRegistry) IncrementDF(termID string, delta int64) {
-	dfKey := makeDFKey(termID)
-	// Use merge operator for atomic increment (no read-modify-write race)
-	r.pebble.Merge(dfKey, encodeInt64(delta), pebbledb.NoSync)
+	r.dfBatchMu.Lock()
+	r.dfBatch[termID] += delta
+	r.dfBatchMu.Unlock()
+}
+
+// flushDFBatch writes accumulated DF increments to Pebble in a single batch.
+// Called periodically from mergeWorker (every 5 seconds).
+func (r *PebbleFSTRegistry) flushDFBatch() {
+	r.dfBatchMu.Lock()
+	if len(r.dfBatch) == 0 {
+		r.dfBatchMu.Unlock()
+		return
+	}
+	// Swap the batch map to minimize lock time
+	batch := r.dfBatch
+	r.dfBatch = make(map[string]int64, len(batch))
+	r.dfBatchMu.Unlock()
+
+	// Write all increments in a single Pebble batch
+	pebbleBatch := r.pebble.NewBatch()
+	for termID, delta := range batch {
+		dfKey := makeDFKey(termID)
+		pebbleBatch.Merge(dfKey, encodeInt64(delta), nil)
+	}
+	pebbleBatch.Commit(pebbledb.NoSync)
+	pebbleBatch.Close()
 }
 
 // GetTotalDocs returns the total indexed documents.
@@ -405,6 +467,9 @@ func (r *PebbleFSTRegistry) Close() error {
 	// Stop background worker
 	close(r.closeCh)
 	r.wg.Wait()
+
+	// Flush pending DF increments
+	r.flushDFBatch()
 
 	// Final merge before closing
 	r.doMerge()
@@ -861,6 +926,9 @@ func (r *PebbleFSTRegistry) mergeWorker() {
 				r.doMerge()
 			}
 		case <-metaTicker.C:
+			// Flush batched DF increments to Pebble
+			r.flushDFBatch()
+
 			// Periodically save metadata if dirty (avoids save on every new term)
 			if r.metaDirty.Load() {
 				r.saveMeta()
