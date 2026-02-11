@@ -65,6 +65,12 @@ type DocumentBatcher struct {
 	mu      sync.Mutex
 	batches map[string]*nodeBatch // key: nodeID
 	closed  bool
+
+	// Track in-flight flush goroutines so FlushWait can block until they finish.
+	inflightWg sync.WaitGroup
+
+	// Limits concurrent HTTP requests to search nodes (prevents flooding).
+	flushSema chan struct{}
 }
 
 type nodeBatch struct {
@@ -92,6 +98,7 @@ func NewDocumentBatcher(httpClient *http.Client, cfg BatcherConfig, log logger.L
 		httpClient: httpClient,
 		log:        log,
 		batches:    make(map[string]*nodeBatch),
+		flushSema:  make(chan struct{}, 16), // max 16 concurrent HTTP requests to search nodes
 	}
 }
 
@@ -224,12 +231,18 @@ func (b *DocumentBatcher) flushBatchLocked(batch *nodeBatch) {
 	batch.errCh = make(chan error, b.config.MaxBatchSize)
 	batch.pending = 0
 
-	// Flush asynchronously
+	// Flush asynchronously (tracked by inflightWg for FlushWait)
+	b.inflightWg.Add(1)
 	go b.doFlush(nodeID, nodeAddr, docs, errCh, pending)
 }
 
 func (b *DocumentBatcher) doFlush(nodeID, nodeAddr string, docs []BatchDocument, errCh chan error, pending int) {
+	defer b.inflightWg.Done()
 	defer close(errCh)
+
+	// Limit concurrent HTTP requests to search nodes
+	b.flushSema <- struct{}{}
+	defer func() { <-b.flushSema }()
 
 	err := b.sendBulkRequest(nodeAddr, docs)
 
@@ -281,7 +294,7 @@ func (b *DocumentBatcher) sendBulkRequest(nodeAddr string, docs []BatchDocument)
 	return nil
 }
 
-// Flush forces all pending batches to be sent immediately.
+// Flush forces all pending batches to be sent immediately (non-blocking).
 func (b *DocumentBatcher) Flush() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -295,7 +308,15 @@ func (b *DocumentBatcher) Flush() {
 	}
 }
 
-// Close stops the batcher and flushes any remaining documents.
+// FlushWait flushes all pending batches and blocks until every in-flight
+// HTTP request to search nodes has completed. This provides backpressure:
+// the caller cannot send more documents until the previous wave is accepted.
+func (b *DocumentBatcher) FlushWait() {
+	b.Flush()
+	b.inflightWg.Wait()
+}
+
+// Close stops the batcher, flushes remaining documents, and waits for completion.
 func (b *DocumentBatcher) Close() {
 	b.mu.Lock()
 	b.closed = true
@@ -308,6 +329,8 @@ func (b *DocumentBatcher) Close() {
 		b.flushBatchLocked(batch)
 	}
 	b.mu.Unlock()
+
+	b.inflightWg.Wait()
 }
 
 // Stats returns current batching statistics.

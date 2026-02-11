@@ -447,7 +447,9 @@ func (h *handler) handleBulkIngest(w http.ResponseWriter, r *http.Request) {
 
 	wg.Wait()
 
-	// Flush the batcher to ensure all documents are sent
+	// Flush remaining batches (non-blocking). The batcher's flushSema
+	// limits concurrent HTTP requests to search nodes, preventing flooding
+	// without serializing the coordinator.
 	if batcher := h.coord.DocumentBatcher(); batcher != nil {
 		batcher.Flush()
 	}

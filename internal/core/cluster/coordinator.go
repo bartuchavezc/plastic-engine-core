@@ -602,6 +602,7 @@ func (c *Coordinator) enrichAssignments(ctx context.Context, assignments []searc
 			assignment.Fields = append([]indexes.FieldMapping(nil), def.FieldMappings...)
 		}
 		assignment.ShardStrategy = def.ShardStrategy
+		assignment.RefreshInterval = def.RefreshTime
 	}
 
 	return assignments, nil

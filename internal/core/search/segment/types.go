@@ -112,11 +112,28 @@ type Config struct {
 	// FlushThreshold is the number of documents before flushing to disk.
 	FlushThreshold int
 
+	// FlushThresholdBytes is the estimated memory size before flushing to disk.
+	// This acts as a safety net for documents with many fields/terms.
+	// Default: 32MB. Set to 0 to disable byte-based flushing.
+	FlushThresholdBytes int64
+
+	// FlushInterval is how often the periodic flush check runs.
+	// Default: 10s.
+	FlushInterval time.Duration
+
 	// MaxSegmentsPerLevel is the maximum segments before triggering merge.
 	MaxSegmentsPerLevel int
 
 	// LevelSizeMultiplier is how much larger each level is.
 	LevelSizeMultiplier int
+
+	// MergeWorkers is the number of dedicated merge goroutines.
+	// Default: 2.
+	MergeWorkers int
+
+	// MergeInterval is how often the merge scheduler checks for work.
+	// Default: 30s.
+	MergeInterval time.Duration
 
 	// DataDir is the directory for segment files.
 	DataDir string
@@ -139,9 +156,13 @@ type Config struct {
 // DefaultConfig returns sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		FlushThreshold:      5000, // 5k docs before flush (periodic flush every 5s handles low-load cases)
-		MaxSegmentsPerLevel: 5,    // Keep low for search performance (merge consolidates segments)
+		FlushThreshold:      5000,              // 5k docs before flush
+		FlushThresholdBytes: 32 * 1024 * 1024,   // 32MB estimated memory
+		FlushInterval:       10 * time.Second,   // Check every 10s
+		MaxSegmentsPerLevel: 5,                  // Keep low for search performance
 		LevelSizeMultiplier: 10,
+		MergeWorkers:        2,                  // 2 dedicated merge goroutines
+		MergeInterval:       30 * time.Second,   // Check every 30s
 		DataDir:             "segments",
 		FSTRebuildThreshold: 1000,
 	}

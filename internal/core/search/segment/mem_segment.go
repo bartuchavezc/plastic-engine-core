@@ -11,11 +11,12 @@ import (
 type MemSegment struct {
 	mu sync.RWMutex
 
-	id       string
-	postings map[string]*memPostingList // term_id -> posting list
-	docCount int
-	termDF   map[string]int64 // term_id -> local DF (docs in this segment)
-	docs     map[string]bool  // doc_id -> exists (for counting unique docs)
+	id             string
+	postings       map[string]*memPostingList // term_id -> posting list
+	docCount       int
+	estimatedBytes int64              // estimated memory usage in bytes
+	termDF         map[string]int64   // term_id -> local DF (docs in this segment)
+	docs           map[string]bool    // doc_id -> exists (for counting unique docs)
 
 	createdAt time.Time
 	minDocID  string
@@ -67,6 +68,8 @@ func (s *MemSegment) Add(termID, docID string, tf int, positions []int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	var addedBytes int64
+
 	// Get or create posting list for this term
 	pl, ok := s.postings[termID]
 	if !ok {
@@ -75,6 +78,7 @@ func (s *MemSegment) Add(termID, docID string, tf int, positions []int) {
 			postings: make([]Posting, 0, 8),
 		}
 		s.postings[termID] = pl
+		addedBytes += int64(len(termID)) + 64 // map entry + struct overhead
 	}
 
 	// Check if this doc already has a posting for this term (linear search - usually small)
@@ -97,12 +101,14 @@ func (s *MemSegment) Add(termID, docID string, tf int, positions []int) {
 			Positions: positions,
 		})
 		s.termDF[termID]++
+		addedBytes += int64(len(docID)+len(positions)*8) + 32 // posting overhead
 	}
 
 	// Track document
 	if !s.docs[docID] {
 		s.docs[docID] = true
 		s.docCount++
+		addedBytes += int64(len(docID)) + 50 // doc map entry
 
 		// Update min/max
 		if s.minDocID == "" || docID < s.minDocID {
@@ -112,6 +118,8 @@ func (s *MemSegment) Add(termID, docID string, tf int, positions []int) {
 			s.maxDocID = docID
 		}
 	}
+
+	s.estimatedBytes += addedBytes
 }
 
 // AddPosting adds a posting struct directly.
@@ -162,6 +170,13 @@ func (s *MemSegment) TermCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.postings)
+}
+
+// EstimatedBytes returns the estimated memory usage of this segment in bytes.
+func (s *MemSegment) EstimatedBytes() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.estimatedBytes
 }
 
 // Close releases resources (no-op for memory segment).
@@ -254,6 +269,7 @@ func (s *MemSegment) Clear() {
 	s.termDF = make(map[string]int64)
 	s.docs = make(map[string]bool)
 	s.docCount = 0
+	s.estimatedBytes = 0
 	s.minDocID = ""
 	s.maxDocID = ""
 }

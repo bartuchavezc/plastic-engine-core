@@ -32,6 +32,7 @@ var (
 type ShardWorkerConfig struct {
 	MaxWorkers    int
 	QueueCapacity int
+	MaxBatchSize  int           // Max items in a batch before forcing flush (0 = 512)
 	RefreshTime   time.Duration // Time to wait before flushing batched documents
 }
 
@@ -41,6 +42,9 @@ func (c *ShardWorkerConfig) applyDefaults() {
 	}
 	if c.QueueCapacity <= 0 {
 		c.QueueCapacity = 256
+	}
+	if c.MaxBatchSize <= 0 {
+		c.MaxBatchSize = 512
 	}
 	// RefreshTime = 0 means immediate (no batching)
 }
@@ -71,6 +75,7 @@ type ShardWorker struct {
 	batchMu      sync.Mutex
 	currentBatch []batchedItem
 	refreshTime  time.Duration
+	maxBatchSize int
 }
 
 type batchedItem struct {
@@ -96,8 +101,9 @@ func NewShardWorker(shardID string, shard *shards.Shard, cfg ShardWorkerConfig, 
 		assignments: assignments,
 
 		log:          log,
-		currentBatch: make([]batchedItem, 0),
+		currentBatch: make([]batchedItem, 0, 64),
 		refreshTime:  cfg.RefreshTime, // May be 0 for immediate processing
+		maxBatchSize: cfg.MaxBatchSize,
 	}
 
 	// Workers that prepare and add items to batch (CPU-bound, no I/O in lock)
@@ -117,6 +123,9 @@ func NewShardWorker(shardID string, shard *shards.Shard, cfg ShardWorkerConfig, 
 func (w *ShardWorker) Submit(ctx context.Context, item WorkItem) error {
 	select {
 	case w.queue <- item:
+		if mp := metrics.Global(); mp != nil {
+			mp.RecordIndexingQueueChange(ctx, w.shardID, 1)
+		}
 		return nil
 	case <-w.closing:
 		return fmt.Errorf("shard worker shutting down")
@@ -181,7 +190,7 @@ func (w *ShardWorker) doFlush() {
 		return
 	}
 	batch := w.currentBatch
-	w.currentBatch = make([]batchedItem, 0, cap(batch))
+	w.currentBatch = make([]batchedItem, 0, 64) // fixed capacity to avoid high-water-mark leak
 	w.batchMu.Unlock()
 
 	// Process entirely outside the lock - no contention with addToBatch
@@ -216,11 +225,12 @@ func (w *ShardWorker) processSwappedBatch(batch []batchedItem) {
 	start := time.Now()
 
 	// Process the entire batch
-	if err := w.processBatch(ctx, batch); err != nil {
+	batchErr := w.processBatch(ctx, batch)
+	if batchErr != nil {
 		w.log.Error("processSwappedBatch: failed to process batch",
 			logger.Field{Key: "shard_id", Value: w.shardID},
 			logger.Field{Key: "batch_size", Value: batchSize},
-			logger.Field{Key: "error", Value: err},
+			logger.Field{Key: "error", Value: batchErr},
 		)
 	} else {
 		w.log.Info("processSwappedBatch: batch processed successfully",
@@ -235,6 +245,10 @@ func (w *ShardWorker) processSwappedBatch(batch []batchedItem) {
 	// Record metrics
 	if mp := metrics.Global(); mp != nil {
 		mp.RecordIndexingBatch(ctx, w.shardID, batchSize, latency)
+		mp.RecordIndexingQueueChange(ctx, w.shardID, -int64(batchSize))
+		if batchErr == nil && len(batch) > 0 {
+			mp.RecordDocumentsIngestedBatch(ctx, batch[0].indexDef.ID, int64(batchSize))
+		}
 	}
 
 	w.log.Debug("processSwappedBatch: completed",
@@ -308,6 +322,10 @@ func (w *ShardWorker) addToBatch(item WorkItem) {
 		logger.Field{Key: "plans_count", Value: len(plans)},
 	)
 
+	// Release raw payload — it's been parsed into validationResult.Parsed.
+	// Keeping it in the batch doubles per-document memory and causes OOM under load.
+	item.Command.RawPayload = nil
+
 	// Prepare the item to add (all data ready, no I/O needed)
 	preparedItem := batchedItem{
 		command:  item.Command,
@@ -337,8 +355,8 @@ func (w *ShardWorker) addToBatch(item WorkItem) {
 		logger.Field{Key: "batch_size", Value: batchSize},
 	)
 
-	// If refresh time is 0, signal immediate flush (handled by flush loop)
-	if refreshTime == 0 {
+	// Signal flush if: immediate mode (refreshTime=0) or batch hit max size
+	if refreshTime == 0 || batchSize >= w.maxBatchSize {
 		select {
 		case w.flushSignal <- struct{}{}:
 		default:

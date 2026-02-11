@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"plastic-engine-core/internal/core/cluster/indexes"
 	"plastic-engine-core/internal/core/search/segment"
@@ -35,6 +36,7 @@ type Assignment struct {
 	Tokenizer        string
 	MappingVersion   int
 	Fields           []indexes.FieldMapping
+	RefreshInterval  time.Duration // Configurable flush interval for segments (0 = use default 10s)
 }
 
 // Manager coordinates the lifecycle of shards owned by a search node.
@@ -128,13 +130,7 @@ func (m *Manager) ensureLocalShard(assignment Assignment) error {
 		existing.Info = assignment
 		// Reopen segment manager if it's closed (e.g., after restart)
 		if existing.Segments == nil {
-			segmentMgr, err := segment.NewManager(segment.Config{
-				FlushThreshold:      5000,
-				MaxSegmentsPerLevel: 5,
-				LevelSizeMultiplier: 10,
-				DataDir:             m.shardPath(assignment.ID),
-				TermRegistry:        m.globalRegistry, // Use shared registry
-			})
+			segmentMgr, err := segment.NewManager(m.segmentConfig(m.shardPath(assignment.ID), assignment))
 			if err != nil {
 				m.mu.Unlock()
 				return fmt.Errorf("reopen segment manager for shard %s: %w", assignment.ID, err)
@@ -164,13 +160,7 @@ func (m *Manager) openShard(assignment Assignment) error {
 		return fmt.Errorf("write manifest for shard %s: %w", assignment.ID, err)
 	}
 
-	segmentMgr, err := segment.NewManager(segment.Config{
-		FlushThreshold:      5000,
-		MaxSegmentsPerLevel: 5,
-		LevelSizeMultiplier: 10,
-		DataDir:             shardPath,
-		TermRegistry:        m.globalRegistry, // Use shared registry
-	})
+	segmentMgr, err := segment.NewManager(m.segmentConfig(shardPath, assignment))
 	if err != nil {
 		return fmt.Errorf("open segment manager for shard %s: %w", assignment.ID, err)
 	}
@@ -179,6 +169,17 @@ func (m *Manager) openShard(assignment Assignment) error {
 	defer m.mu.Unlock()
 	m.shards[assignment.ID] = &Shard{ID: assignment.ID, Segments: segmentMgr, Info: assignment}
 	return nil
+}
+
+// segmentConfig builds a segment.Config for a shard, using assignment settings with defaults.
+func (m *Manager) segmentConfig(dataDir string, assignment Assignment) segment.Config {
+	cfg := segment.DefaultConfig()
+	cfg.DataDir = dataDir
+	cfg.TermRegistry = m.globalRegistry
+	if assignment.RefreshInterval > 0 {
+		cfg.FlushInterval = assignment.RefreshInterval
+	}
+	return cfg
 }
 
 func (m *Manager) shardPath(id string) string {
@@ -341,13 +342,7 @@ func (m *Manager) loadExistingShards() error {
 			continue
 		}
 
-		segmentMgr, err := segment.NewManager(segment.Config{
-			FlushThreshold:      5000,
-			MaxSegmentsPerLevel: 5,
-			LevelSizeMultiplier: 10,
-			DataDir:             shardPath,
-			TermRegistry:        m.globalRegistry, // Use shared registry
-		})
+		segmentMgr, err := segment.NewManager(m.segmentConfig(shardPath, assignment))
 		if err != nil {
 			return fmt.Errorf("open existing shard %s: %w", id, err)
 		}

@@ -21,6 +21,7 @@ const (
 	OpDelete
 	OpAlias
 	OpCheckpoint
+	OpIndexDoc // Batch: entire document in one entry
 )
 
 // Entry represents a single WAL entry.
@@ -56,6 +57,26 @@ type AliasOp struct {
 type CheckpointOp struct {
 	SegmentID string `json:"segment_id"`
 	Sequence  uint64 `json:"sequence"`
+}
+
+// DocTermPosting is a term posting within a DocIndexOp.
+type DocTermPosting struct {
+	TermID    string
+	Term      string
+	TF        int
+	Positions []int
+}
+
+// DocFieldTerms groups term postings by field.
+type DocFieldTerms struct {
+	Field    string
+	Postings []DocTermPosting
+}
+
+// DocIndexOp represents a full document index operation (all fields+terms in one entry).
+type DocIndexOp struct {
+	DocID  string
+	Fields []DocFieldTerms
 }
 
 // WAL provides write-ahead logging for durability.
@@ -174,6 +195,156 @@ func (w *WAL) AppendIndex(op IndexOp) (uint64, error) {
 		op.TermID, op.DocID, op.TF, op.Field))
 
 	return w.Append(Entry{Type: OpIndex, Data: data})
+}
+
+// AppendDocument appends an entire document in a single WAL entry using binary encoding.
+// Format: docIDLen(2) + docID + fieldCount(2) + [fieldNameLen(2) + fieldName + postingCount(2) +
+//         [termIDLen(2) + termID + termLen(2) + term + tf(2) + posCount(2) + positions(4 each)]]
+func (w *WAL) AppendDocument(op DocIndexOp) (uint64, error) {
+	data := encodeDocIndexOp(op)
+	return w.Append(Entry{Type: OpIndexDoc, Data: data})
+}
+
+func encodeDocIndexOp(op DocIndexOp) []byte {
+	// Estimate size to reduce allocations
+	size := 2 + len(op.DocID) + 2
+	for _, f := range op.Fields {
+		size += 2 + len(f.Field) + 2
+		for _, p := range f.Postings {
+			size += 2 + len(p.TermID) + 2 + len(p.Term) + 2 + 2 + len(p.Positions)*4
+		}
+	}
+
+	buf := make([]byte, 0, size)
+
+	// DocID
+	buf = appendWALString(buf, op.DocID)
+
+	// Field count
+	buf = appendWALUint16(buf, uint16(len(op.Fields)))
+
+	for _, f := range op.Fields {
+		buf = appendWALString(buf, f.Field)
+		buf = appendWALUint16(buf, uint16(len(f.Postings)))
+
+		for _, p := range f.Postings {
+			buf = appendWALString(buf, p.TermID)
+			buf = appendWALString(buf, p.Term)
+			buf = appendWALUint16(buf, uint16(p.TF))
+			buf = appendWALUint16(buf, uint16(len(p.Positions)))
+			for _, pos := range p.Positions {
+				buf = appendWALUint32(buf, uint32(pos))
+			}
+		}
+	}
+
+	return buf
+}
+
+// DecodeDocIndexOp decodes a binary-encoded DocIndexOp.
+func DecodeDocIndexOp(data []byte) (DocIndexOp, error) {
+	pos := 0
+	op := DocIndexOp{}
+
+	docID, n, err := readWALString(data, pos)
+	if err != nil {
+		return op, fmt.Errorf("read docID: %w", err)
+	}
+	op.DocID = docID
+	pos += n
+
+	if pos+2 > len(data) {
+		return op, fmt.Errorf("data too short for field count")
+	}
+	fieldCount := int(binary.BigEndian.Uint16(data[pos:]))
+	pos += 2
+
+	op.Fields = make([]DocFieldTerms, 0, fieldCount)
+
+	for i := 0; i < fieldCount; i++ {
+		fieldName, n, err := readWALString(data, pos)
+		if err != nil {
+			return op, fmt.Errorf("read field name: %w", err)
+		}
+		pos += n
+
+		if pos+2 > len(data) {
+			return op, fmt.Errorf("data too short for posting count")
+		}
+		postingCount := int(binary.BigEndian.Uint16(data[pos:]))
+		pos += 2
+
+		field := DocFieldTerms{
+			Field:    fieldName,
+			Postings: make([]DocTermPosting, 0, postingCount),
+		}
+
+		for j := 0; j < postingCount; j++ {
+			termID, n, err := readWALString(data, pos)
+			if err != nil {
+				return op, fmt.Errorf("read termID: %w", err)
+			}
+			pos += n
+
+			term, n, err := readWALString(data, pos)
+			if err != nil {
+				return op, fmt.Errorf("read term: %w", err)
+			}
+			pos += n
+
+			if pos+4 > len(data) {
+				return op, fmt.Errorf("data too short for tf/posCount")
+			}
+			tf := int(binary.BigEndian.Uint16(data[pos:]))
+			pos += 2
+			posCount := int(binary.BigEndian.Uint16(data[pos:]))
+			pos += 2
+
+			if pos+posCount*4 > len(data) {
+				return op, fmt.Errorf("data too short for positions")
+			}
+			positions := make([]int, posCount)
+			for k := 0; k < posCount; k++ {
+				positions[k] = int(binary.BigEndian.Uint32(data[pos:]))
+				pos += 4
+			}
+
+			field.Postings = append(field.Postings, DocTermPosting{
+				TermID:    termID,
+				Term:      term,
+				TF:        tf,
+				Positions: positions,
+			})
+		}
+
+		op.Fields = append(op.Fields, field)
+	}
+
+	return op, nil
+}
+
+func appendWALString(buf []byte, s string) []byte {
+	buf = appendWALUint16(buf, uint16(len(s)))
+	return append(buf, s...)
+}
+
+func appendWALUint16(buf []byte, v uint16) []byte {
+	return append(buf, byte(v>>8), byte(v))
+}
+
+func appendWALUint32(buf []byte, v uint32) []byte {
+	return append(buf, byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+}
+
+func readWALString(data []byte, pos int) (string, int, error) {
+	if pos+2 > len(data) {
+		return "", 0, fmt.Errorf("data too short for string length at pos %d", pos)
+	}
+	length := int(binary.BigEndian.Uint16(data[pos:]))
+	if pos+2+length > len(data) {
+		return "", 0, fmt.Errorf("data too short for string content at pos %d", pos)
+	}
+	return string(data[pos+2 : pos+2+length]), 2 + length, nil
 }
 
 // AppendAlias appends an alias operation.

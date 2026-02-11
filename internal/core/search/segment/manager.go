@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"plastic-engine-core/internal/adapters/telemetry/metrics"
 	"plastic-engine-core/internal/core/search/wal"
 )
 
@@ -43,6 +44,12 @@ func (h *mergeHeap) Pop() any {
 	return item
 }
 
+// mergeJob represents a merge task for the merge pool.
+type mergeJob struct {
+	segments []*DiskSegment
+	level    int
+}
+
 // Manager orchestrates segments, handling indexing, searching, and merging.
 type Manager struct {
 	mu sync.RWMutex
@@ -68,11 +75,16 @@ type Manager struct {
 	manifest *Manifest
 
 	// Background workers
-	flushCh chan struct{}
-	mergeCh chan struct{}
-	closeCh chan struct{}
-	wg      sync.WaitGroup
-	closed  atomic.Bool
+	flushCh    chan struct{}
+	mergeCh    chan struct{}   // signal to check for merges
+	mergeJobCh chan mergeJob   // merge jobs for pool workers
+	closeCh    chan struct{}
+	wg         sync.WaitGroup
+	closed     atomic.Bool
+
+	// Track segments being merged to avoid double-selection
+	mergingMu sync.Mutex
+	merging   map[string]bool
 
 	// Stats
 	indexedDocs atomic.Int64
@@ -146,6 +158,17 @@ func NewManager(config Config) (*Manager, error) {
 		return nil, fmt.Errorf("open wal: %w", err)
 	}
 
+	// Apply defaults for zero-value config fields
+	if config.FlushInterval <= 0 {
+		config.FlushInterval = 10 * time.Second
+	}
+	if config.MergeInterval <= 0 {
+		config.MergeInterval = 30 * time.Second
+	}
+	if config.MergeWorkers <= 0 {
+		config.MergeWorkers = 2
+	}
+
 	m := &Manager{
 		registry:     registry,
 		ownsRegistry: ownsRegistry,
@@ -153,7 +176,9 @@ func NewManager(config Config) (*Manager, error) {
 		config:       config,
 		flushCh:      make(chan struct{}, 1),
 		mergeCh:      make(chan struct{}, 1),
+		mergeJobCh:   make(chan mergeJob, config.MergeWorkers*2),
 		closeCh:      make(chan struct{}),
+		merging:      make(map[string]bool),
 	}
 
 	// Load or create manifest
@@ -233,27 +258,47 @@ func (m *Manager) replayWAL() error {
 	}
 
 	for _, entry := range entries {
-		if entry.Type == wal.OpIndex {
+		switch entry.Type {
+		case wal.OpIndex:
+			// Legacy per-term format
 			var op wal.IndexOp
 			if err := json.Unmarshal(entry.Data, &op); err != nil {
 				continue
 			}
 			m.active.Add(op.TermID, op.DocID, op.TF, op.Positions)
+
+		case wal.OpIndexDoc:
+			// New batch format: entire document in one entry
+			op, err := wal.DecodeDocIndexOp(entry.Data)
+			if err != nil {
+				continue
+			}
+			for _, field := range op.Fields {
+				for _, p := range field.Postings {
+					m.active.Add(p.TermID, op.DocID, p.TF, p.Positions)
+				}
+			}
 		}
 	}
 
 	return nil
 }
 
-// startBackgroundWorkers starts flush and merge workers.
+// startBackgroundWorkers starts flush, merge, and sync workers.
 func (m *Manager) startBackgroundWorkers() {
 	// Periodic flush worker
 	m.wg.Add(1)
 	go m.flushWorker()
 
-	// Periodic merge worker
+	// Merge scheduler (checks for merge candidates)
 	m.wg.Add(1)
-	go m.mergeWorker()
+	go m.mergeScheduler()
+
+	// Dedicated merge pool workers
+	for i := 0; i < m.config.MergeWorkers; i++ {
+		m.wg.Add(1)
+		go m.mergePoolWorker()
+	}
 
 	// Periodic sync worker
 	m.wg.Add(1)
@@ -264,7 +309,7 @@ func (m *Manager) startBackgroundWorkers() {
 func (m *Manager) flushWorker() {
 	defer m.wg.Done()
 
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(m.config.FlushInterval)
 	defer ticker.Stop()
 
 	for {
@@ -279,11 +324,11 @@ func (m *Manager) flushWorker() {
 	}
 }
 
-// mergeWorker handles merging segments.
-func (m *Manager) mergeWorker() {
+// mergeScheduler checks for merge candidates and submits jobs to the pool.
+func (m *Manager) mergeScheduler() {
 	defer m.wg.Done()
 
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(m.config.MergeInterval)
 	defer ticker.Stop()
 
 	for {
@@ -291,9 +336,23 @@ func (m *Manager) mergeWorker() {
 		case <-m.closeCh:
 			return
 		case <-ticker.C:
-			m.maybeMerge()
+			m.scheduleMerge()
 		case <-m.mergeCh:
-			m.doMerge()
+			m.scheduleMerge()
+		}
+	}
+}
+
+// mergePoolWorker processes merge jobs from the pool.
+func (m *Manager) mergePoolWorker() {
+	defer m.wg.Done()
+
+	for {
+		select {
+		case <-m.closeCh:
+			return
+		case job := <-m.mergeJobCh:
+			m.executeMerge(job)
 		}
 	}
 }
@@ -344,13 +403,14 @@ func (m *Manager) Index(ctx context.Context, field, term, docID string, tf int, 
 	m.mu.Lock()
 	m.active.Add(termID, docID, tf, positions)
 	docCount := m.active.DocCount()
+	estimatedBytes := m.active.EstimatedBytes()
 	m.mu.Unlock()
 
 	// Update registry stats
 	m.registry.IncrementDF(termID, 1)
 
-	// Check if we need to flush
-	if docCount >= m.config.FlushThreshold {
+	// Check if we need to flush (by docs or by bytes)
+	if m.needsFlush(docCount, estimatedBytes) {
 		select {
 		case m.flushCh <- struct{}{}:
 		default:
@@ -364,35 +424,77 @@ func (m *Manager) Index(ctx context.Context, field, term, docID string, tf int, 
 // IndexDocument indexes all terms for a document.
 // Assumes fieldTerms contains unique terms per field (pre-aggregated by tokenizer).
 func (m *Manager) IndexDocument(ctx context.Context, docID string, fieldTerms map[string][]TermPosting) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	if m.closed.Load() {
+		return fmt.Errorf("manager is closed")
+	}
+
+	// Phase 1: Resolve all termIDs OUTSIDE the lock (I/O with registry)
+	type resolvedPosting struct {
+		termID    string
+		field     string
+		term      string
+		tf        int
+		positions []int
+	}
+	resolved := make([]resolvedPosting, 0, 16)
+	walFields := make([]wal.DocFieldTerms, 0, len(fieldTerms))
 
 	for field, terms := range fieldTerms {
+		walPostings := make([]wal.DocTermPosting, 0, len(terms))
+
 		for _, tp := range terms {
 			termID, err := m.registry.GetOrCreate(ctx, field, tp.Term)
 			if err != nil {
 				return fmt.Errorf("get or create term: %w", err)
 			}
 
-			if _, err := m.wal.AppendIndex(wal.IndexOp{
+			resolved = append(resolved, resolvedPosting{
+				termID:    termID,
+				field:     field,
+				term:      tp.Term,
+				tf:        tp.TF,
+				positions: tp.Positions,
+			})
+
+			walPostings = append(walPostings, wal.DocTermPosting{
 				TermID:    termID,
-				DocID:     docID,
+				Term:      tp.Term,
 				TF:        tp.TF,
 				Positions: tp.Positions,
-				Field:     field,
-				Term:      tp.Term,
-			}); err != nil {
-				return fmt.Errorf("append to wal: %w", err)
-			}
-
-			m.registry.IncrementDF(termID, 1)
-			m.active.Add(termID, docID, tp.TF, tp.Positions)
+			})
 		}
+
+		walFields = append(walFields, wal.DocFieldTerms{
+			Field:    field,
+			Postings: walPostings,
+		})
+	}
+
+	// Phase 2: Single WAL write for the entire document
+	if _, err := m.wal.AppendDocument(wal.DocIndexOp{
+		DocID:  docID,
+		Fields: walFields,
+	}); err != nil {
+		return fmt.Errorf("append doc to wal: %w", err)
+	}
+
+	// Phase 3: Add to active segment under lock (fast, memory-only)
+	m.mu.Lock()
+	for _, rp := range resolved {
+		m.active.Add(rp.termID, docID, rp.tf, rp.positions)
+	}
+	docCount := m.active.DocCount()
+	estimatedBytes := m.active.EstimatedBytes()
+	m.mu.Unlock()
+
+	// Phase 4: Batch DF increments OUTSIDE the lock
+	for _, rp := range resolved {
+		m.registry.IncrementDF(rp.termID, 1)
 	}
 
 	m.indexedDocs.Add(1)
 
-	if m.active.DocCount() >= m.config.FlushThreshold {
+	if m.needsFlush(docCount, estimatedBytes) {
 		select {
 		case m.flushCh <- struct{}{}:
 		default:
@@ -426,6 +528,10 @@ func (m *Manager) Search(ctx context.Context, field, term string) ([]Hit, error)
 	return m.SearchByTermID(termID)
 }
 
+// searchSema limits concurrent disk-segment search goroutines to prevent goroutine explosion
+// under concurrent queries with many segments. 8 allows good parallelism within 2-CPU containers.
+var searchSema = make(chan struct{}, 8)
+
 // SearchByTermID searches using a term ID directly.
 func (m *Manager) SearchByTermID(termID string) ([]Hit, error) {
 	m.mu.RLock()
@@ -440,14 +546,16 @@ func (m *Manager) SearchByTermID(termID string) ([]Hit, error) {
 	hits := active.Search(termID)
 	allHits = append(allHits, hits...)
 
-	// Search disk segments in parallel
+	// Search disk segments in parallel (bounded concurrency)
 	var wg sync.WaitGroup
 	var hitsMu sync.Mutex
 
 	for _, seg := range segments {
 		wg.Add(1)
+		searchSema <- struct{}{} // acquire slot
 		go func(s *DiskSegment) {
 			defer wg.Done()
+			defer func() { <-searchSema }() // release slot
 			hits := s.Search(termID)
 			if len(hits) > 0 {
 				hitsMu.Lock()
@@ -476,13 +584,25 @@ func (m *Manager) CreateAlias(field, newTerm, existingTermID string) error {
 	return m.registry.CreateAlias(field, newTerm, existingTermID)
 }
 
+// needsFlush returns true if the active segment should be flushed.
+func (m *Manager) needsFlush(docCount int, estimatedBytes int64) bool {
+	if docCount >= m.config.FlushThreshold {
+		return true
+	}
+	if m.config.FlushThresholdBytes > 0 && estimatedBytes >= m.config.FlushThresholdBytes {
+		return true
+	}
+	return false
+}
+
 // maybeFlush checks if flush is needed.
 func (m *Manager) maybeFlush() {
 	m.mu.RLock()
 	docCount := m.active.DocCount()
+	estimatedBytes := m.active.EstimatedBytes()
 	m.mu.RUnlock()
 
-	if docCount >= m.config.FlushThreshold {
+	if m.needsFlush(docCount, estimatedBytes) {
 		m.doFlush()
 	}
 }
@@ -497,10 +617,13 @@ func (m *Manager) doFlush() {
 
 	// Swap active segment
 	oldActive := m.active
+	docCount := oldActive.DocCount()
 	newActiveID := fmt.Sprintf("mem_%d", time.Now().UnixNano())
 	m.active = NewMemSegment(newActiveID)
 	m.manifest.ActiveID = newActiveID
 	m.mu.Unlock()
+
+	flushStart := time.Now()
 
 	// Flush old active to disk
 	segmentDir := filepath.Join(m.config.DataDir, "segments")
@@ -511,6 +634,11 @@ func (m *Manager) doFlush() {
 		m.active = oldActive
 		m.mu.Unlock()
 		return
+	}
+
+	// Record flush metrics
+	if mp := metrics.Global(); mp != nil {
+		mp.RecordSegmentFlush(context.Background(), docCount, time.Since(flushStart))
 	}
 
 	// Add to segments list
@@ -546,75 +674,110 @@ func (m *Manager) doFlush() {
 	}
 }
 
-// maybeMerge checks if merge is needed.
-func (m *Manager) maybeMerge() {
+// scheduleMerge finds merge candidates and submits jobs to the merge pool.
+// Runs in the merge scheduler goroutine — no heavy I/O here.
+func (m *Manager) scheduleMerge() {
 	m.mu.RLock()
-	segmentCount := len(m.segments)
+	segments := make([]*DiskSegment, len(m.segments))
+	copy(segments, m.segments)
 	m.mu.RUnlock()
 
-	if segmentCount >= m.config.MaxSegmentsPerLevel {
-		m.doMerge()
-	}
-}
+	m.mergingMu.Lock()
+	defer m.mergingMu.Unlock()
 
-// doMerge merges segments based on tiered policy.
-func (m *Manager) doMerge() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Group segments by level
+	// Group by level, excluding segments already being merged
 	levels := make(map[int][]*DiskSegment)
-	for _, seg := range m.segments {
+	for _, seg := range segments {
+		if m.merging[seg.ID()] {
+			continue
+		}
 		level := seg.Meta().Level
 		levels[level] = append(levels[level], seg)
 	}
 
-	// Find a level that needs merging
+	// Submit merge jobs for all levels that need it
 	for level, segs := range levels {
 		if len(segs) >= m.config.MaxSegmentsPerLevel {
-			// Merge these segments
-			merged, err := m.mergeSegments(segs, level+1)
-			if err != nil {
-				continue
+			// Mark segments as merging
+			for _, seg := range segs {
+				m.merging[seg.ID()] = true
 			}
 
-			// Remove old segments, add merged
-			newSegments := make([]*DiskSegment, 0, len(m.segments)-len(segs)+1)
-			oldPaths := make([]string, 0, len(segs))
-
-			for _, s := range m.segments {
-				isOld := false
-				for _, old := range segs {
-					if s.ID() == old.ID() {
-						isOld = true
-						oldPaths = append(oldPaths, s.Path())
-						break
-					}
-				}
-				if !isOld {
-					newSegments = append(newSegments, s)
+			select {
+			case m.mergeJobCh <- mergeJob{segments: segs, level: level + 1}:
+			default:
+				// Pool busy, unmark and try later
+				for _, seg := range segs {
+					delete(m.merging, seg.ID())
 				}
 			}
-
-			newSegments = append(newSegments, merged)
-			m.segments = newSegments
-
-			// Update manifest
-			m.updateManifestAfterMerge(segs, merged)
-
-			// Close and delete old segments (after a delay to ensure no readers)
-			go func(paths []string, oldSegs []*DiskSegment) {
-				time.Sleep(5 * time.Second)
-				for _, seg := range oldSegs {
-					seg.Close()
-				}
-				for _, path := range paths {
-					os.Remove(path)
-				}
-			}(oldPaths, segs)
-
-			break // One merge per call
 		}
+	}
+}
+
+// executeMerge performs a merge job. Runs in a merge pool worker goroutine.
+// The heavy I/O (mergeSegments) runs without holding m.mu.
+func (m *Manager) executeMerge(job mergeJob) {
+	mergeStart := time.Now()
+
+	// Phase 1: Merge segments (I/O heavy, no lock needed)
+	merged, err := m.mergeSegments(job.segments, job.level)
+
+	// Unmark merging segments regardless of success
+	m.mergingMu.Lock()
+	for _, seg := range job.segments {
+		delete(m.merging, seg.ID())
+	}
+	m.mergingMu.Unlock()
+
+	if err != nil {
+		return
+	}
+
+	// Phase 2: Swap segments under write lock (fast, no I/O)
+	oldIDs := make(map[string]bool, len(job.segments))
+	for _, seg := range job.segments {
+		oldIDs[seg.ID()] = true
+	}
+
+	m.mu.Lock()
+	newSegments := make([]*DiskSegment, 0, len(m.segments)-len(job.segments)+1)
+	oldPaths := make([]string, 0, len(job.segments))
+
+	for _, s := range m.segments {
+		if oldIDs[s.ID()] {
+			oldPaths = append(oldPaths, s.Path())
+		} else {
+			newSegments = append(newSegments, s)
+		}
+	}
+	newSegments = append(newSegments, merged)
+	m.segments = newSegments
+	m.mu.Unlock()
+
+	// Phase 3: Update manifest
+	m.updateManifestAfterMerge(job.segments, merged)
+
+	// Phase 4: Cleanup old segments after delay
+	go func(paths []string, oldSegs []*DiskSegment) {
+		time.Sleep(5 * time.Second)
+		for _, seg := range oldSegs {
+			seg.Close()
+		}
+		for _, path := range paths {
+			os.Remove(path)
+		}
+	}(oldPaths, job.segments)
+
+	// Record merge metrics
+	if mp := metrics.Global(); mp != nil {
+		mp.RecordSegmentMerge(context.Background(), len(job.segments), time.Since(mergeStart))
+	}
+
+	// Trigger another merge check (merged segment may enable cascading merges)
+	select {
+	case m.mergeCh <- struct{}{}:
+	default:
 	}
 }
 

@@ -273,6 +273,7 @@ func (s *Service) enrichAssignments(ctx context.Context, assignments []searchsha
 			assignment.Fields = append([]indexes.FieldMapping(nil), def.FieldMappings...)
 		}
 		assignment.ShardStrategy = def.ShardStrategy
+		assignment.RefreshInterval = def.RefreshTime
 	}
 
 	return assignments, nil

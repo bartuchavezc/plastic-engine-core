@@ -82,10 +82,17 @@ type Provider struct {
 	IndexingWriteDuration metric.Float64Histogram
 
 	// Search metrics (granular)
-	SearchDuration       metric.Float64Histogram
-	SearchShardsQueried  metric.Int64Counter
-	SearchHitsTotal      metric.Int64Counter
+	SearchDuration        metric.Float64Histogram
+	SearchShardsQueried   metric.Int64Counter
+	SearchHitsTotal       metric.Int64Counter
 	SearchPostingsScanned metric.Int64Counter
+
+	// Segment metrics
+	SegmentFlushTotal    metric.Int64Counter
+	SegmentFlushDuration metric.Float64Histogram
+	SegmentFlushDocs     metric.Int64Counter
+	SegmentMergeTotal    metric.Int64Counter
+	SegmentMergeDuration metric.Float64Histogram
 
 	// Prometheus registry if enabled
 	promRegistry *promclient.Registry
@@ -185,6 +192,11 @@ func Init(ctx context.Context, cfg Config) (*Provider, func(context.Context) err
 
 	// Initialize search metrics
 	if err := provider.initSearchMetrics(); err != nil {
+		return nil, nil, err
+	}
+
+	// Initialize segment metrics
+	if err := provider.initSegmentMetrics(); err != nil {
 		return nil, nil, err
 	}
 
@@ -551,6 +563,85 @@ func (p *Provider) RecordSearchPostingsScanned(ctx context.Context, shardID, que
 	p.SearchPostingsScanned.Add(ctx, count, metric.WithAttributes(
 		attribute.String("shard_id", shardID),
 		attribute.String("query_type", queryType),
+	))
+}
+
+// RecordDocumentsIngestedBatch records N documents ingested in a single call.
+func (p *Provider) RecordDocumentsIngestedBatch(ctx context.Context, indexID string, count int64) {
+	p.DocumentsIngested.Add(ctx, count, metric.WithAttributes(
+		attribute.String("index_id", indexID),
+	))
+}
+
+// Segment metrics initialization and recording
+
+func (p *Provider) initSegmentMetrics() error {
+	var err error
+
+	p.SegmentFlushTotal, err = p.meter.Int64Counter(
+		"plastic_segment_flush_total",
+		metric.WithDescription("Total number of segment flushes to disk"),
+		metric.WithUnit("{flush}"),
+	)
+	if err != nil {
+		return fmt.Errorf("create segment_flush_total: %w", err)
+	}
+
+	p.SegmentFlushDuration, err = p.meter.Float64Histogram(
+		"plastic_segment_flush_duration_seconds",
+		metric.WithDescription("Duration of segment flush operations"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
+	)
+	if err != nil {
+		return fmt.Errorf("create segment_flush_duration: %w", err)
+	}
+
+	p.SegmentFlushDocs, err = p.meter.Int64Counter(
+		"plastic_segment_flush_docs_total",
+		metric.WithDescription("Total documents flushed to disk segments"),
+		metric.WithUnit("{document}"),
+	)
+	if err != nil {
+		return fmt.Errorf("create segment_flush_docs: %w", err)
+	}
+
+	p.SegmentMergeTotal, err = p.meter.Int64Counter(
+		"plastic_segment_merge_total",
+		metric.WithDescription("Total number of segment merge operations"),
+		metric.WithUnit("{merge}"),
+	)
+	if err != nil {
+		return fmt.Errorf("create segment_merge_total: %w", err)
+	}
+
+	p.SegmentMergeDuration, err = p.meter.Float64Histogram(
+		"plastic_segment_merge_duration_seconds",
+		metric.WithDescription("Duration of segment merge operations"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.1, 0.5, 1, 2.5, 5, 10, 30, 60),
+	)
+	if err != nil {
+		return fmt.Errorf("create segment_merge_duration: %w", err)
+	}
+
+	return nil
+}
+
+// RecordSegmentFlush records a segment flush operation.
+func (p *Provider) RecordSegmentFlush(ctx context.Context, docCount int, duration time.Duration) {
+	p.SegmentFlushTotal.Add(ctx, 1)
+	p.SegmentFlushDuration.Record(ctx, duration.Seconds())
+	p.SegmentFlushDocs.Add(ctx, int64(docCount))
+}
+
+// RecordSegmentMerge records a segment merge operation.
+func (p *Provider) RecordSegmentMerge(ctx context.Context, segmentCount int, duration time.Duration) {
+	p.SegmentMergeTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.Int("segment_count", segmentCount),
+	))
+	p.SegmentMergeDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(
+		attribute.Int("segment_count", segmentCount),
 	))
 }
 
