@@ -122,6 +122,70 @@ func (s *MemSegment) Add(termID, docID string, tf int, positions []int) {
 	s.estimatedBytes += addedBytes
 }
 
+// SegmentEntry represents a single posting to add in batch.
+type SegmentEntry struct {
+	TermID    string
+	DocID     string
+	TF        int
+	Positions []int
+}
+
+// AddBatch adds multiple postings under a single lock acquisition.
+// This is significantly faster than calling Add() N times for large batches.
+func (s *MemSegment) AddBatch(entries []SegmentEntry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var addedBytes int64
+
+	for _, e := range entries {
+		pl, ok := s.postings[e.TermID]
+		if !ok {
+			pl = &memPostingList{
+				termID:   e.TermID,
+				postings: make([]Posting, 0, 8),
+			}
+			s.postings[e.TermID] = pl
+			addedBytes += int64(len(e.TermID)) + 64
+		}
+
+		found := false
+		for i := range pl.postings {
+			if pl.postings[i].DocID == e.DocID {
+				pl.postings[i].TF = e.TF
+				pl.postings[i].Positions = e.Positions
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			pl.postings = append(pl.postings, Posting{
+				DocID:     e.DocID,
+				TF:        e.TF,
+				Positions: e.Positions,
+			})
+			s.termDF[e.TermID]++
+			addedBytes += int64(len(e.DocID)+len(e.Positions)*8) + 32
+		}
+
+		if !s.docs[e.DocID] {
+			s.docs[e.DocID] = true
+			s.docCount++
+			addedBytes += int64(len(e.DocID)) + 50
+
+			if s.minDocID == "" || e.DocID < s.minDocID {
+				s.minDocID = e.DocID
+			}
+			if e.DocID > s.maxDocID {
+				s.maxDocID = e.DocID
+			}
+		}
+	}
+
+	s.estimatedBytes += addedBytes
+}
+
 // AddPosting adds a posting struct directly.
 func (s *MemSegment) AddPosting(termID string, posting Posting) {
 	s.Add(termID, posting.DocID, posting.TF, posting.Positions)

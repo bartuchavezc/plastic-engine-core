@@ -143,7 +143,7 @@ type Config struct {
 	// Deprecated: Use TermRegistryMergeConfig instead.
 	FSTRebuildThreshold int
 
-	// TermRegistryMergeConfig configures the Pebble+FST hybrid term registry.
+	// TermRegistryMergeConfig configures the Cache+FST term registry.
 	// If nil, DefaultMergeConfig() is used.
 	TermRegistryMergeConfig *MergeConfig
 
@@ -157,7 +157,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		FlushThreshold:      5000,              // 5k docs before flush
-		FlushThresholdBytes: 32 * 1024 * 1024,   // 32MB estimated memory
+		FlushThresholdBytes: 16 * 1024 * 1024,   // 16MB estimated memory (keep MemSegment small on 2GB containers)
 		FlushInterval:       10 * time.Second,   // Check every 10s
 		MaxSegmentsPerLevel: 5,                  // Keep low for search performance
 		LevelSizeMultiplier: 10,

@@ -52,13 +52,17 @@ services:
       - METRICS_PORT=9091
       - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
       - OTEL_EXPORTER_OTLP_INSECURE=true
+      # Tell Go GC to collect aggressively before hitting the container limit.
+      # Without this, Go may use all 4GB before GC triggers → OOM kill with no log.
+      # Rule of thumb: 90-95% of container memory limit.
+      - GOMEMLIMIT=3800MiB
     volumes:
       - search-1-data:/app/data
     deploy:
       resources:
         limits:
           cpus: '2'
-          memory: 2G
+          memory: 4G
         reservations:
           cpus: '0.5'
           memory: 512M
@@ -92,13 +96,14 @@ services:
       - METRICS_PORT=9092
       - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
       - OTEL_EXPORTER_OTLP_INSECURE=true
+      - GOMEMLIMIT=3800MiB
     volumes:
       - search-2-data:/app/data
     deploy:
       resources:
         limits:
           cpus: '2'
-          memory: 2G
+          memory: 4G
         reservations:
           cpus: '0.5'
           memory: 512M

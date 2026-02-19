@@ -137,7 +137,7 @@ func NewManager(config Config) (*Manager, error) {
 			mergeConfig = *config.TermRegistryMergeConfig
 		}
 
-		newRegistry, err := NewPebbleFSTRegistry(PebbleFSTConfig{
+		newRegistry, err := NewCacheFSTRegistry(CacheFSTConfig{
 			DataDir:     registryDir,
 			MergeConfig: mergeConfig,
 		})
@@ -421,78 +421,111 @@ func (m *Manager) Index(ctx context.Context, field, term, docID string, tf int, 
 	return nil
 }
 
-// IndexDocument indexes all terms for a document.
-// Assumes fieldTerms contains unique terms per field (pre-aggregated by tokenizer).
-func (m *Manager) IndexDocument(ctx context.Context, docID string, fieldTerms map[string][]TermPosting) error {
+// DocumentBatch represents a document with its field terms for batch indexing.
+type DocumentBatch struct {
+	DocID      string
+	FieldTerms map[string][]TermPosting
+}
+
+// IndexDocumentBatch indexes multiple documents in a single optimized pass.
+// This is much faster than calling IndexDocument N times because:
+//   - Term lookups are deduplicated across all documents (each unique term resolved once)
+//   - WAL writes use a single lock acquisition for the entire batch
+//   - Segment adds use a single lock acquisition via AddBatch
+//   - DF increments are aggregated per unique term
+func (m *Manager) IndexDocumentBatch(ctx context.Context, docs []DocumentBatch) error {
 	if m.closed.Load() {
 		return fmt.Errorf("manager is closed")
 	}
-
-	// Phase 1: Resolve all termIDs OUTSIDE the lock (I/O with registry)
-	type resolvedPosting struct {
-		termID    string
-		field     string
-		term      string
-		tf        int
-		positions []int
+	if len(docs) == 0 {
+		return nil
 	}
-	resolved := make([]resolvedPosting, 0, 16)
-	walFields := make([]wal.DocFieldTerms, 0, len(fieldTerms))
 
-	for field, terms := range fieldTerms {
-		walPostings := make([]wal.DocTermPosting, 0, len(terms))
+	// Pre-calculate total postings to pre-allocate allEntries in one shot,
+	// avoiding repeated reallocs and over-allocation.
+	totalPostings := 0
+	for _, doc := range docs {
+		for _, terms := range doc.FieldTerms {
+			totalPostings += len(terms)
+		}
+	}
 
-		for _, tp := range terms {
-			termID, err := m.registry.GetOrCreate(ctx, field, tp.Term)
-			if err != nil {
-				return fmt.Errorf("get or create term: %w", err)
+	termCache := make(map[string]string, 64) // "field\x00term" -> termID (dedup across batch)
+	allEntries := make([]SegmentEntry, 0, totalPostings)
+	walOps := make([]wal.DocIndexOp, 0, len(docs))
+	dfDeltas := make(map[string]int64, 64) // termID -> delta (aggregated across all docs)
+
+	// Single pass: resolve terms, build segment entries and WAL ops simultaneously.
+	// Previously we built a per-doc intermediate slice (allDocs[i].entries) and then
+	// copied everything into allEntries — doubling peak memory for the entries data.
+	// Now allEntries is built directly: one copy, one allocation.
+	for _, doc := range docs {
+		walFields := make([]wal.DocFieldTerms, 0, len(doc.FieldTerms))
+
+		for field, terms := range doc.FieldTerms {
+			walPostings := make([]wal.DocTermPosting, 0, len(terms))
+
+			for _, tp := range terms {
+				// Deduplicated term resolution: each unique field+term resolved once.
+				key := field + "\x00" + tp.Term
+				termID, ok := termCache[key]
+				if !ok {
+					var err error
+					termID, err = m.registry.GetOrCreate(ctx, field, tp.Term)
+					if err != nil {
+						return fmt.Errorf("get or create term: %w", err)
+					}
+					termCache[key] = termID
+				}
+
+				allEntries = append(allEntries, SegmentEntry{
+					TermID:    termID,
+					DocID:     doc.DocID,
+					TF:        tp.TF,
+					Positions: tp.Positions,
+				})
+
+				walPostings = append(walPostings, wal.DocTermPosting{
+					TermID:    termID,
+					Term:      tp.Term,
+					TF:        tp.TF,
+					Positions: tp.Positions,
+				})
+
+				dfDeltas[termID]++
 			}
 
-			resolved = append(resolved, resolvedPosting{
-				termID:    termID,
-				field:     field,
-				term:      tp.Term,
-				tf:        tp.TF,
-				positions: tp.Positions,
-			})
-
-			walPostings = append(walPostings, wal.DocTermPosting{
-				TermID:    termID,
-				Term:      tp.Term,
-				TF:        tp.TF,
-				Positions: tp.Positions,
+			walFields = append(walFields, wal.DocFieldTerms{
+				Field:    field,
+				Postings: walPostings,
 			})
 		}
 
-		walFields = append(walFields, wal.DocFieldTerms{
-			Field:    field,
-			Postings: walPostings,
+		walOps = append(walOps, wal.DocIndexOp{
+			DocID:  doc.DocID,
+			Fields: walFields,
 		})
 	}
 
-	// Phase 2: Single WAL write for the entire document
-	if _, err := m.wal.AppendDocument(wal.DocIndexOp{
-		DocID:  docID,
-		Fields: walFields,
-	}); err != nil {
-		return fmt.Errorf("append doc to wal: %w", err)
+	// Phase 2: Batch WAL write (single lock acquisition for all documents)
+	if _, err := m.wal.AppendDocuments(walOps); err != nil {
+		return fmt.Errorf("append docs to wal: %w", err)
 	}
+	walOps = nil // release WAL data before AddBatch to reduce peak memory
 
-	// Phase 3: Add to active segment under lock (fast, memory-only)
+	// Phase 3: Add to active segment under single lock (AddBatch = 1 lock acquisition)
 	m.mu.Lock()
-	for _, rp := range resolved {
-		m.active.Add(rp.termID, docID, rp.tf, rp.positions)
-	}
+	m.active.AddBatch(allEntries)
 	docCount := m.active.DocCount()
 	estimatedBytes := m.active.EstimatedBytes()
 	m.mu.Unlock()
 
-	// Phase 4: Batch DF increments OUTSIDE the lock
-	for _, rp := range resolved {
-		m.registry.IncrementDF(rp.termID, 1)
+	// Phase 4: Aggregated DF increments (one call per unique term, not per posting)
+	for termID, delta := range dfDeltas {
+		m.registry.IncrementDF(termID, delta)
 	}
 
-	m.indexedDocs.Add(1)
+	m.indexedDocs.Add(int64(len(docs)))
 
 	if m.needsFlush(docCount, estimatedBytes) {
 		select {
@@ -502,6 +535,12 @@ func (m *Manager) IndexDocument(ctx context.Context, docID string, fieldTerms ma
 	}
 
 	return nil
+}
+
+// IndexDocument indexes all terms for a single document.
+// For batches, prefer IndexDocumentBatch which is significantly faster.
+func (m *Manager) IndexDocument(ctx context.Context, docID string, fieldTerms map[string][]TermPosting) error {
+	return m.IndexDocumentBatch(ctx, []DocumentBatch{{DocID: docID, FieldTerms: fieldTerms}})
 }
 
 // TermPosting is a term with its posting data for indexing.
@@ -1029,8 +1068,8 @@ func (m *Manager) Registry() TermRegistry {
 }
 
 // FSTRegistry returns the FST registry for advanced term operations.
-func (m *Manager) FSTRegistry() *PebbleFSTRegistry {
-	return m.registry.(*PebbleFSTRegistry)
+func (m *Manager) FSTRegistry() *CacheFSTRegistry {
+	return m.registry.(*CacheFSTRegistry)
 }
 
 // ListTerms returns all terms, optionally filtered by field.

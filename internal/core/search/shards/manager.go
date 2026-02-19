@@ -19,6 +19,11 @@ type ManagerConfig struct {
 	// TermRegistryMergeConfig configures the global term registry.
 	// If nil, DefaultMergeConfig() is used.
 	TermRegistryMergeConfig *segment.MergeConfig
+
+	// NodeResources overrides auto-detection of CPU and memory.
+	// Leave zero to auto-detect from the OS (recommended).
+	// The coordinator can push per-node overrides by populating this field.
+	NodeResources segment.NodeResourceProfile
 }
 
 // Note: Migrated from pebble to segment-based storage
@@ -52,6 +57,9 @@ type Manager struct {
 	registryErr    error
 	registryConfig *segment.MergeConfig
 
+	// nodeConfig holds auto-tuned (or coordinator-overridden) resource configuration.
+	nodeConfig segment.NodeConfig
+
 	loadOnce sync.Once
 	loadErr  error
 }
@@ -62,12 +70,23 @@ func NewManager(rootDir string) *Manager {
 }
 
 // NewManagerWithConfig builds a Manager with the given configuration.
+// Node resources (CPU, memory) are auto-detected unless overridden in config.NodeResources.
 func NewManagerWithConfig(config ManagerConfig) *Manager {
+	nodeCfg := segment.TuneForNode(config.NodeResources)
+
 	return &Manager{
 		rootDir:        config.RootDir,
 		shards:         make(map[string]*Shard),
 		registryConfig: config.TermRegistryMergeConfig,
+		nodeConfig:     nodeCfg,
 	}
+}
+
+// NodeConfig returns the auto-tuned resource configuration for this node.
+// Callers creating ShardWorkers should use NodeConfig().WorkerMaxWorkers,
+// WorkerMaxBatchSize, WorkerQueueCapacity to build a ShardWorkerConfig.
+func (m *Manager) NodeConfig() segment.NodeConfig {
+	return m.nodeConfig
 }
 
 // ensureGlobalRegistry creates the global term registry if not already created.
@@ -84,7 +103,7 @@ func (m *Manager) ensureGlobalRegistry() error {
 			mergeConfig = *m.registryConfig
 		}
 
-		registry, err := segment.NewPebbleFSTRegistry(segment.PebbleFSTConfig{
+		registry, err := segment.NewCacheFSTRegistry(segment.CacheFSTConfig{
 			DataDir:     registryDir,
 			MergeConfig: mergeConfig,
 		})
@@ -171,9 +190,10 @@ func (m *Manager) openShard(assignment Assignment) error {
 	return nil
 }
 
-// segmentConfig builds a segment.Config for a shard, using assignment settings with defaults.
+// segmentConfig builds a segment.Config for a shard using auto-tuned node config.
+// Per-index overrides (e.g. RefreshInterval) are applied on top.
 func (m *Manager) segmentConfig(dataDir string, assignment Assignment) segment.Config {
-	cfg := segment.DefaultConfig()
+	cfg := m.nodeConfig.SegmentCfg()
 	cfg.DataDir = dataDir
 	cfg.TermRegistry = m.globalRegistry
 	if assignment.RefreshInterval > 0 {

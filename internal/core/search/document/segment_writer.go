@@ -3,10 +3,20 @@ package document
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"plastic-engine-core/internal/core/search/segment"
 	"plastic-engine-core/internal/pkg/logger"
 )
+
+// termIndexPool reuses map[string]int across prepareDocumentBatch calls.
+// Avoids per-field heap allocations (~1-2KB each) that drive GC pressure
+// during high-throughput ingestion (512 docs × N fields = hundreds of maps/chunk).
+var termIndexPool = sync.Pool{
+	New: func() any {
+		return make(map[string]int, 32)
+	},
+}
 
 // SegmentIndexWriter writes document postings using the segment-based storage.
 type SegmentIndexWriter struct {
@@ -81,7 +91,13 @@ func (w *SegmentIndexWriter) Index(ctx context.Context, req DocumentWriteRequest
 	return w.segmentMgr.IndexDocument(ctx, req.DocumentID, fieldTerms)
 }
 
-// IndexBatch indexes multiple documents.
+// indexBatchChunkSize is the max docs per IndexDocumentBatch call.
+// Prevents memory explosion when the worker accumulates large batches (e.g. 21K docs).
+// Each chunk's intermediate allocations are released before the next chunk starts.
+const indexBatchChunkSize = 512
+
+// IndexBatch indexes multiple documents using the optimized batch path.
+// Large batches are automatically chunked to bound memory usage.
 func (w *SegmentIndexWriter) IndexBatch(ctx context.Context, requests []DocumentWriteRequest) error {
 	if len(requests) == 0 {
 		return nil
@@ -91,22 +107,95 @@ func (w *SegmentIndexWriter) IndexBatch(ctx context.Context, requests []Document
 		logger.Field{Key: "requests_count", Value: len(requests)},
 	)
 
-	for i, req := range requests {
-		if err := w.Index(ctx, req); err != nil {
-			w.log.Error("IndexBatch: failed to index document",
-				logger.Field{Key: "document_id", Value: req.DocumentID},
-				logger.Field{Key: "index", Value: i},
+	// Process in chunks to bound memory
+	indexed := 0
+	for start := 0; start < len(requests); start += indexBatchChunkSize {
+		end := start + indexBatchChunkSize
+		if end > len(requests) {
+			end = len(requests)
+		}
+		chunk := requests[start:end]
+
+		docs := w.prepareDocumentBatch(chunk)
+		if len(docs) == 0 {
+			continue
+		}
+
+		if err := w.segmentMgr.IndexDocumentBatch(ctx, docs); err != nil {
+			w.log.Error("IndexBatch: IndexDocumentBatch failed",
+				logger.Field{Key: "chunk_size", Value: len(docs)},
 				logger.Field{Key: "error", Value: err},
 			)
-			return fmt.Errorf("indexing document %s: %w", req.DocumentID, err)
+			return err
 		}
+		indexed += len(docs)
 	}
 
 	w.log.Info("IndexBatch: completed successfully",
-		logger.Field{Key: "documents_count", Value: len(requests)},
+		logger.Field{Key: "documents_count", Value: indexed},
 	)
 
 	return nil
+}
+
+// prepareDocumentBatch converts write requests to segment.DocumentBatch format.
+func (w *SegmentIndexWriter) prepareDocumentBatch(requests []DocumentWriteRequest) []segment.DocumentBatch {
+	docs := make([]segment.DocumentBatch, 0, len(requests))
+
+	for _, req := range requests {
+		if req.DocumentID == "" {
+			continue
+		}
+
+		fieldTerms := make(map[string][]segment.TermPosting, len(req.Fields))
+
+		for _, field := range req.Fields {
+			name := field.Field.Name
+			if name == "" {
+				continue
+			}
+			tokens := field.Tokens
+			if len(tokens) == 0 {
+				continue
+			}
+
+			termIndex := termIndexPool.Get().(map[string]int)
+			clear(termIndex)
+			postings := make([]segment.TermPosting, 0, len(tokens)/2)
+
+			for _, token := range tokens {
+				if token.Term == "" {
+					continue
+				}
+				if idx, exists := termIndex[token.Term]; exists {
+					postings[idx].TF++
+					postings[idx].Positions = append(postings[idx].Positions, token.Position)
+				} else {
+					termIndex[token.Term] = len(postings)
+					postings = append(postings, segment.TermPosting{
+						Term:      token.Term,
+						TF:        1,
+						Positions: []int{token.Position},
+					})
+				}
+			}
+
+			termIndexPool.Put(termIndex)
+
+			if len(postings) > 0 {
+				fieldTerms[name] = postings
+			}
+		}
+
+		if len(fieldTerms) > 0 {
+			docs = append(docs, segment.DocumentBatch{
+				DocID:      req.DocumentID,
+				FieldTerms: fieldTerms,
+			})
+		}
+	}
+
+	return docs
 }
 
 // Delete removes a document from the index.

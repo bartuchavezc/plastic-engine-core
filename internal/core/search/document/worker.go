@@ -9,6 +9,7 @@ import (
 
 	"plastic-engine-core/internal/adapters/telemetry/metrics"
 	indexes "plastic-engine-core/internal/core/cluster/indexes"
+	"plastic-engine-core/internal/core/search/segment"
 	shards "plastic-engine-core/internal/core/search/shards"
 	"plastic-engine-core/internal/pkg/logger"
 
@@ -23,10 +24,24 @@ var (
 	ErrBackpressure = errors.New("indexer backpressure: shard queue full")
 
 	// globalFlushSema limits concurrent flush operations across all shards.
-	// This prevents Pebble lock contention when many shards flush simultaneously.
-	// Value of 2 allows some parallelism while avoiding excessive contention.
-	globalFlushSema = make(chan struct{}, 2)
+	// Sized at init time by TuneForNode based on detected CPU/memory.
+	// Override via PLASTIC_CPUS or PLASTIC_MEMORY_MB environment variables.
+	globalFlushSema = initFlushSema()
 )
+
+func initFlushSema() chan struct{} {
+	nodeCfg := segment.TuneForNode(segment.DetectResources())
+	return make(chan struct{}, nodeCfg.FlushConcurrency)
+}
+
+// SetFlushConcurrency overrides the global flush semaphore capacity.
+// Must be called before any ShardWorkers are created.
+func SetFlushConcurrency(n int) {
+	if n < 1 {
+		n = 1
+	}
+	globalFlushSema = make(chan struct{}, n)
+}
 
 // ShardWorkerConfig controls concurrency and queueing for a shard.
 type ShardWorkerConfig struct {
@@ -36,15 +51,21 @@ type ShardWorkerConfig struct {
 	RefreshTime   time.Duration // Time to wait before flushing batched documents
 }
 
+// workerDefaults is computed once at init from TuneForNode so applyDefaults()
+// uses hardware-appropriate values instead of static constants.
+var workerDefaults = func() segment.NodeConfig {
+	return segment.TuneForNode(segment.DetectResources())
+}()
+
 func (c *ShardWorkerConfig) applyDefaults() {
 	if c.MaxWorkers <= 0 {
-		c.MaxWorkers = 4
+		c.MaxWorkers = workerDefaults.WorkerMaxWorkers
 	}
 	if c.QueueCapacity <= 0 {
-		c.QueueCapacity = 256
+		c.QueueCapacity = workerDefaults.WorkerQueueCapacity
 	}
 	if c.MaxBatchSize <= 0 {
-		c.MaxBatchSize = 512
+		c.MaxBatchSize = workerDefaults.WorkerMaxBatchSize
 	}
 	// RefreshTime = 0 means immediate (no batching)
 }
@@ -79,10 +100,10 @@ type ShardWorker struct {
 }
 
 type batchedItem struct {
-	command  Command
-	plans    []FieldPlan
+	// Pre-tokenized write request, ready for IndexBatch.
+	// Tokenization happens in the worker pool (parallel) not the flush loop (serial).
+	writeReq DocumentWriteRequest
 	indexDef indexes.IndexDefinition
-	parsed   map[string]any // Validated and parsed payload
 }
 
 // NewShardWorker spins up worker goroutines ready to process commands.
@@ -259,20 +280,13 @@ func (w *ShardWorker) processSwappedBatch(batch []batchedItem) {
 }
 
 func (w *ShardWorker) addToBatch(item WorkItem) {
-	w.log.Debug("addToBatch: received item",
-		logger.Field{Key: "shard_id", Value: w.shardID},
-		logger.Field{Key: "document_id", Value: item.Command.DocumentID},
-		logger.Field{Key: "payload_size", Value: len(item.Command.RawPayload)},
-	)
+	// ═══════════════════════════════════════════════════════════════════════
+	// OUTSIDE LOCK: All CPU-intensive work happens here in the worker pool.
+	// This runs across MaxWorkers goroutines in parallel.
+	// ═══════════════════════════════════════════════════════════════════════
 
 	ctx := context.Background()
 
-	// ═══════════════════════════════════════════════════════════════════════
-	// OUTSIDE LOCK: All CPU/IO intensive operations happen here
-	// This allows other goroutines to add to the batch while we prepare
-	// ═══════════════════════════════════════════════════════════════════════
-
-	// Resolve assignment and plans for this item
 	_, indexDef, err := w.assignments.AssignmentForShard(ctx, w.shardID)
 	if err != nil {
 		w.log.Error("addToBatch: failed to resolve assignment",
@@ -283,13 +297,6 @@ func (w *ShardWorker) addToBatch(item WorkItem) {
 		return
 	}
 
-	w.log.Debug("addToBatch: assignment resolved",
-		logger.Field{Key: "shard_id", Value: w.shardID},
-		logger.Field{Key: "index_id", Value: indexDef.ID},
-		logger.Field{Key: "fields_count", Value: len(indexDef.FieldMappings)},
-	)
-
-	// Validate and parse the raw payload using sonic
 	validator := NewValidator()
 	validationResult := validator.Validate(item.Command.RawPayload, indexDef)
 	if !validationResult.Valid {
@@ -301,11 +308,8 @@ func (w *ShardWorker) addToBatch(item WorkItem) {
 		return
 	}
 
-	w.log.Debug("addToBatch: document validated",
-		logger.Field{Key: "shard_id", Value: w.shardID},
-		logger.Field{Key: "document_id", Value: item.Command.DocumentID},
-		logger.Field{Key: "parsed_fields", Value: len(validationResult.Parsed)},
-	)
+	// Release raw payload immediately after parsing.
+	item.Command.RawPayload = nil
 
 	plans, err := w.planBuilder.BuildPlans(indexDef)
 	if err != nil {
@@ -317,68 +321,9 @@ func (w *ShardWorker) addToBatch(item WorkItem) {
 		return
 	}
 
-	w.log.Debug("addToBatch: plans built",
-		logger.Field{Key: "shard_id", Value: w.shardID},
-		logger.Field{Key: "plans_count", Value: len(plans)},
-	)
-
-	// Release raw payload — it's been parsed into validationResult.Parsed.
-	// Keeping it in the batch doubles per-document memory and causes OOM under load.
-	item.Command.RawPayload = nil
-
-	// Prepare the item to add (all data ready, no I/O needed)
-	preparedItem := batchedItem{
-		command:  item.Command,
-		plans:    plans,
-		indexDef: indexDef,
-		parsed:   validationResult.Parsed,
-	}
-
-	// Use index-specific refresh time, fallback to worker config
-	refreshTime := w.refreshTime
-	if indexDef.RefreshTime > 0 {
-		refreshTime = indexDef.RefreshTime
-	}
-
-	// ═══════════════════════════════════════════════════════════════════════
-	// INSIDE LOCK: Only the append operation (nanoseconds)
-	// ═══════════════════════════════════════════════════════════════════════
-
-	w.batchMu.Lock()
-	w.currentBatch = append(w.currentBatch, preparedItem)
-	batchSize := len(w.currentBatch)
-	w.batchMu.Unlock()
-
-	w.log.Debug("addToBatch: item added to batch",
-		logger.Field{Key: "shard_id", Value: w.shardID},
-		logger.Field{Key: "document_id", Value: item.Command.DocumentID},
-		logger.Field{Key: "batch_size", Value: batchSize},
-	)
-
-	// Signal flush if: immediate mode (refreshTime=0) or batch hit max size
-	if refreshTime == 0 || batchSize >= w.maxBatchSize {
-		select {
-		case w.flushSignal <- struct{}{}:
-		default:
-			// Signal already pending, flush loop will handle it
-		}
-	}
-}
-
-func (w *ShardWorker) processBatch(ctx context.Context, batch []batchedItem) error {
-	if len(batch) == 0 {
-		return nil
-	}
-
-	w.log.Debug("processBatch: starting",
-		logger.Field{Key: "shard_id", Value: w.shardID},
-		logger.Field{Key: "batch_size", Value: len(batch)},
-	)
-
-	// Use the first item's index definition (assuming all items in batch are for same index)
-	indexDef := batch[0].indexDef
-
-	// Get n-gram config from index definition
+	// Tokenize and analyze all fields here in the worker pool (parallel).
+	// Previously this happened in the flush loop (single goroutine) — that was
+	// the main CPU bottleneck. Now all MaxWorkers goroutines tokenize concurrently.
 	ngramConfig := DefaultNgramConfig()
 	if indexDef.NgramConfig.MaxLength > 0 {
 		ngramConfig = NgramConfig{
@@ -387,27 +332,46 @@ func (w *ShardWorker) processBatch(ctx context.Context, batch []batchedItem) err
 			MaxLength: indexDef.NgramConfig.MaxLength,
 		}
 	}
+	writeReq := w.tokenizeDocument(ctx, item.Command.DocumentID, validationResult.Parsed, plans, ngramConfig)
 
-	w.log.Debug("processBatch: ngram config",
-		logger.Field{Key: "shard_id", Value: w.shardID},
-		logger.Field{Key: "ngram_enabled", Value: ngramConfig.Enabled},
-		logger.Field{Key: "ngram_min", Value: ngramConfig.MinLength},
-		logger.Field{Key: "ngram_max", Value: ngramConfig.MaxLength},
-	)
-
-	// Convert batch to DocumentWriteRequests
-	requests := make([]DocumentWriteRequest, 0, len(batch))
-	for _, item := range batch {
-		req := w.prepareWrite(item.command.DocumentID, item.parsed, item.plans, ngramConfig)
-		requests = append(requests, req)
+	// Use index-specific refresh time, fallback to worker config
+	refreshTime := w.refreshTime
+	if indexDef.RefreshTime > 0 {
+		refreshTime = indexDef.RefreshTime
 	}
 
-	w.log.Debug("processBatch: calling IndexBatch",
-		logger.Field{Key: "shard_id", Value: w.shardID},
-		logger.Field{Key: "requests_count", Value: len(requests)},
-	)
+	// ═══════════════════════════════════════════════════════════════════════
+	// INSIDE LOCK: Only the slice append (nanoseconds)
+	// ═══════════════════════════════════════════════════════════════════════
 
-	// Index the batch
+	w.batchMu.Lock()
+	w.currentBatch = append(w.currentBatch, batchedItem{
+		writeReq: writeReq,
+		indexDef: indexDef,
+	})
+	batchSize := len(w.currentBatch)
+	w.batchMu.Unlock()
+
+	if refreshTime == 0 || batchSize >= w.maxBatchSize {
+		select {
+		case w.flushSignal <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// processBatch indexes a pre-tokenized batch. All CPU work (tokenization) was
+// already done in the worker pool by addToBatch — this is now pure I/O.
+func (w *ShardWorker) processBatch(ctx context.Context, batch []batchedItem) error {
+	if len(batch) == 0 {
+		return nil
+	}
+
+	requests := make([]DocumentWriteRequest, len(batch))
+	for i, item := range batch {
+		requests[i] = item.writeReq
+	}
+
 	if err := w.writer.IndexBatch(ctx, requests); err != nil {
 		w.log.Error("processBatch: IndexBatch failed",
 			logger.Field{Key: "shard_id", Value: w.shardID},
@@ -417,7 +381,7 @@ func (w *ShardWorker) processBatch(ctx context.Context, batch []batchedItem) err
 		return err
 	}
 
-	w.log.Info("processBatch: IndexBatch completed successfully",
+	w.log.Info("processBatch: completed",
 		logger.Field{Key: "shard_id", Value: w.shardID},
 		logger.Field{Key: "documents_indexed", Value: len(requests)},
 	)
@@ -425,23 +389,14 @@ func (w *ShardWorker) processBatch(ctx context.Context, batch []batchedItem) err
 	return nil
 }
 
-func (w *ShardWorker) prepareWrite(documentID string, payload map[string]any, plans []FieldPlan, ngramConfig NgramConfig) DocumentWriteRequest {
-	w.log.Debug("prepareWrite: starting",
-		logger.Field{Key: "document_id", Value: documentID},
-		logger.Field{Key: "plans_count", Value: len(plans)},
-		logger.Field{Key: "payload_fields", Value: len(payload)},
-	)
-
+// tokenizeDocument applies tokenizers and analyzers to all fields of a document.
+// Called from addToBatch (worker pool, parallel) instead of processBatch (flush loop, serial).
+func (w *ShardWorker) tokenizeDocument(ctx context.Context, documentID string, payload map[string]any, plans []FieldPlan, ngramConfig NgramConfig) DocumentWriteRequest {
 	fieldResults := make([]FieldTerms, 0, len(plans))
-	ctx := context.Background()
 
 	for _, plan := range plans {
 		rawValue, ok := payload[plan.Field.Name]
 		if !ok {
-			w.log.Debug("prepareWrite: field not in payload",
-				logger.Field{Key: "document_id", Value: documentID},
-				logger.Field{Key: "field_name", Value: plan.Field.Name},
-			)
 			continue
 		}
 
@@ -458,27 +413,15 @@ func (w *ShardWorker) prepareWrite(documentID string, payload map[string]any, pl
 			tokens = plan.Analyzer.Analyze(tokens)
 		}
 
-		// Record tokens metric
 		if mp := metrics.Global(); mp != nil && len(tokens) > 0 {
 			mp.RecordIndexingTokens(ctx, w.shardID, plan.Field.Name, int64(len(tokens)))
 		}
-
-		w.log.Debug("prepareWrite: field processed",
-			logger.Field{Key: "document_id", Value: documentID},
-			logger.Field{Key: "field_name", Value: plan.Field.Name},
-			logger.Field{Key: "tokens_count", Value: len(tokens)},
-		)
 
 		fieldResults = append(fieldResults, FieldTerms{
 			Field:  plan.Field,
 			Tokens: tokens,
 		})
 	}
-
-	w.log.Debug("prepareWrite: completed",
-		logger.Field{Key: "document_id", Value: documentID},
-		logger.Field{Key: "fields_with_tokens", Value: len(fieldResults)},
-	)
 
 	return DocumentWriteRequest{
 		DocumentID:  documentID,

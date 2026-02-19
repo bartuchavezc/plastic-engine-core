@@ -205,6 +205,44 @@ func (w *WAL) AppendDocument(op DocIndexOp) (uint64, error) {
 	return w.Append(Entry{Type: OpIndexDoc, Data: data})
 }
 
+// AppendDocuments appends multiple documents under a single lock acquisition.
+// Much faster than calling AppendDocument N times for batches.
+func (w *WAL) AppendDocuments(ops []DocIndexOp) (uint64, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	var seq uint64
+	for _, op := range ops {
+		data := encodeDocIndexOp(op)
+		w.sequence++
+		seq = w.sequence
+
+		headerSize := 1 + 8 + 4
+		totalSize := headerSize + len(data)
+
+		buf := make([]byte, totalSize)
+		buf[0] = byte(OpIndexDoc)
+		binary.BigEndian.PutUint64(buf[1:9], uint64(time.Now().UnixNano()))
+		binary.BigEndian.PutUint32(buf[9:13], uint32(len(data)))
+		copy(buf[13:], data)
+
+		length := uint32(len(buf))
+		checksum := crc32.ChecksumIEEE(buf)
+
+		binary.Write(w.writer, binary.BigEndian, length)
+		binary.Write(w.writer, binary.BigEndian, checksum)
+		w.writer.Write(buf)
+	}
+
+	if w.syncMode == SyncEvery {
+		if err := w.syncLocked(); err != nil {
+			return 0, err
+		}
+	}
+
+	return seq, nil
+}
+
 func encodeDocIndexOp(op DocIndexOp) []byte {
 	// Estimate size to reduce allocations
 	size := 2 + len(op.DocID) + 2
