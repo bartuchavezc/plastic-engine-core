@@ -136,8 +136,7 @@ func main() {
 	}
 
 	workerCfg := document.ShardWorkerConfig{
-		MaxWorkers:    4,
-		QueueCapacity: 256,
+		// MaxWorkers: 0 → applyDefaults() uses TuneForNode(cpus/2, [2,32])
 	}
 
 	indexService := document.NewService(manager, assignmentProvider, planner, writerFactory, workerCfg, log)

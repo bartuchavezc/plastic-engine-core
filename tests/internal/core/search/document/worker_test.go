@@ -3,7 +3,6 @@ package document_test
 import (
 	"context"
 	"testing"
-	"time"
 
 	indexes "plastic-engine-core/internal/core/cluster/indexes"
 	"plastic-engine-core/internal/core/search/document"
@@ -58,7 +57,7 @@ func TestShardWorkerProcessesDocument(t *testing.T) {
 	worker := document.NewShardWorker(
 		"shard-1",
 		registry.shards["shard-1"],
-		document.ShardWorkerConfig{MaxWorkers: 1, QueueCapacity: 16},
+		document.ShardWorkerConfig{MaxWorkers: 1},
 		planner,
 		writer,
 		provider,
@@ -67,22 +66,28 @@ func TestShardWorkerProcessesDocument(t *testing.T) {
 	defer worker.Close()
 
 	cmd := document.Command{
+		IndexID:    "idx",
+		ShardID:    "shard-1",
 		DocumentID: "doc-1",
 		RawPayload: []byte(`{"title": "Hello Plastic Engine"}`),
 	}
 
-	if err := worker.Submit(context.Background(), document.WorkItem{Command: cmd}); err != nil {
-		t.Fatalf("Submit: %v", err)
+	errs := worker.Process(context.Background(), []document.Command{cmd})
+	if len(errs) > 0 && errs[0] != nil {
+		t.Fatalf("Process: %v", errs[0])
 	}
 
-	// Wait for document to be indexed
-	requireEventually(t, 500*time.Millisecond, func() bool {
-		hits, err := segMgr.Search(context.Background(), "title", "hello")
-		return err == nil && len(hits) > 0
-	})
+	// Document must be immediately searchable (synchronous indexing).
+	hits, err := segMgr.Search(context.Background(), "title", "hello")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatalf("expected hits for 'hello', got none")
+	}
 }
 
-func TestShardWorkerBackpressure(t *testing.T) {
+func TestShardWorkerBulkProcess(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -124,11 +129,10 @@ func TestShardWorkerBackpressure(t *testing.T) {
 	provider := document.NewAssignmentProvider(registry, resolver)
 	planner := document.NewFieldPlanner(document.TokenizerFactory{}, document.AnalyzerFactory{})
 
-	// Use very small queue to trigger backpressure
 	worker := document.NewShardWorker(
 		"shard-1",
 		registry.shards["shard-1"],
-		document.ShardWorkerConfig{MaxWorkers: 1, QueueCapacity: 1},
+		document.ShardWorkerConfig{MaxWorkers: 2},
 		planner,
 		writer,
 		provider,
@@ -136,26 +140,28 @@ func TestShardWorkerBackpressure(t *testing.T) {
 	)
 	defer worker.Close()
 
-	ctx := context.Background()
+	cmds := []document.Command{
+		{IndexID: "idx", ShardID: "shard-1", DocumentID: "doc-1", RawPayload: []byte(`{"title": "alpha beta"}`)},
+		{IndexID: "idx", ShardID: "shard-1", DocumentID: "doc-2", RawPayload: []byte(`{"title": "gamma delta"}`)},
+		{IndexID: "idx", ShardID: "shard-1", DocumentID: "doc-3", RawPayload: []byte(`{"title": "epsilon zeta"}`)},
+	}
 
-	// Fill the queue quickly with multiple items
-	// Since queue capacity is 1, we should hit backpressure quickly
-	var backpressureHit bool
-	for i := 0; i < 10; i++ {
-		err := worker.Submit(ctx, document.WorkItem{
-			Command: document.Command{
-				DocumentID: "doc-" + string(rune('0'+i)),
-				RawPayload: []byte(`{"title": "hello world"}`),
-			},
-		})
+	errs := worker.Process(context.Background(), cmds)
+	for i, err := range errs {
 		if err != nil {
-			backpressureHit = true
-			break
+			t.Fatalf("Process cmd[%d]: %v", i, err)
 		}
 	}
 
-	if !backpressureHit {
-		t.Fatalf("expected backpressure error when queue is full")
+	// All documents must be immediately searchable.
+	for _, term := range []string{"alpha", "gamma", "epsilon"} {
+		hits, err := segMgr.Search(context.Background(), "title", term)
+		if err != nil {
+			t.Fatalf("Search %q: %v", term, err)
+		}
+		if len(hits) == 0 {
+			t.Fatalf("expected hits for %q, got none", term)
+		}
 	}
 }
 

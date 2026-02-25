@@ -132,6 +132,12 @@ type SegmentEntry struct {
 
 // AddBatch adds multiple postings under a single lock acquisition.
 // This is significantly faster than calling Add() N times for large batches.
+//
+// Dedup strategy: In the bulk indexing path, each (termID, docID) pair appears
+// exactly once per batch (the caller already deduplicates during tokenization).
+// We skip the O(N) linear scan for duplicates within existing postings and just
+// append directly. This changes AddBatch from O(entries × postings_per_term) to O(entries).
+// For rare cases where the same doc IS re-indexed, the merge dedup handles it.
 func (s *MemSegment) AddBatch(entries []SegmentEntry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -149,25 +155,15 @@ func (s *MemSegment) AddBatch(entries []SegmentEntry) {
 			addedBytes += int64(len(e.TermID)) + 64
 		}
 
-		found := false
-		for i := range pl.postings {
-			if pl.postings[i].DocID == e.DocID {
-				pl.postings[i].TF = e.TF
-				pl.postings[i].Positions = e.Positions
-				found = true
-				break
-			}
-		}
-
-		if !found {
-			pl.postings = append(pl.postings, Posting{
-				DocID:     e.DocID,
-				TF:        e.TF,
-				Positions: e.Positions,
-			})
-			s.termDF[e.TermID]++
-			addedBytes += int64(len(e.DocID)+len(e.Positions)*8) + 32
-		}
+		// Append-only: skip duplicate scan (O(1) instead of O(N)).
+		// Bulk indexing sends unique (termID, docID) pairs per batch.
+		pl.postings = append(pl.postings, Posting{
+			DocID:     e.DocID,
+			TF:        e.TF,
+			Positions: e.Positions,
+		})
+		s.termDF[e.TermID]++
+		addedBytes += int64(len(e.DocID)+len(e.Positions)*8) + 32
 
 		if !s.docs[e.DocID] {
 			s.docs[e.DocID] = true
@@ -262,32 +258,22 @@ func (s *MemSegment) Iterator() SegmentIterator {
 	}
 	sort.Strings(termIDs)
 
-	// OPTIMIZATION: No deep copy needed - the MemSegment is swapped before iteration
-	// so it won't be modified. Just keep references to the posting lists.
-	postingsRef := make(map[string]*memPostingList, len(s.postings))
-	for termID, pl := range s.postings {
-		postingsRef[termID] = pl
-	}
-
-	dfSnapshot := make(map[string]int64, len(s.termDF))
-	for k, v := range s.termDF {
-		dfSnapshot[k] = v
-	}
-
+	// Reference the original maps directly — the MemSegment is swapped before
+	// iteration so it won't be modified. No copies needed.
 	return &memSegmentIterator{
-		termIDs:     termIDs,
-		postingsRef: postingsRef,
-		df:          dfSnapshot,
-		pos:         -1,
+		termIDs:  termIDs,
+		postings: s.postings,
+		termDF:   s.termDF,
+		pos:      -1,
 	}
 }
 
 // memSegmentIterator iterates over a memory segment.
 type memSegmentIterator struct {
-	termIDs     []string
-	postingsRef map[string]*memPostingList // References, not copies
-	df          map[string]int64
-	pos         int
+	termIDs  []string
+	postings map[string]*memPostingList
+	termDF   map[string]int64
+	pos      int
 }
 
 func (it *memSegmentIterator) Next() bool {
@@ -306,8 +292,7 @@ func (it *memSegmentIterator) Postings() []Posting {
 	if it.pos < 0 || it.pos >= len(it.termIDs) {
 		return nil
 	}
-	termID := it.termIDs[it.pos]
-	if pl, ok := it.postingsRef[termID]; ok {
+	if pl, ok := it.postings[it.termIDs[it.pos]]; ok {
 		return pl.postings
 	}
 	return nil
@@ -317,7 +302,7 @@ func (it *memSegmentIterator) DF() int64 {
 	if it.pos < 0 || it.pos >= len(it.termIDs) {
 		return 0
 	}
-	return it.df[it.termIDs[it.pos]]
+	return it.termDF[it.termIDs[it.pos]]
 }
 
 func (it *memSegmentIterator) Close() error {

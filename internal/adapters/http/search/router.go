@@ -17,6 +17,7 @@ import (
 // Indexer defines the contract required to index documents.
 type Indexer interface {
 	Index(ctx context.Context, cmd document.Command) error
+	IndexBulk(ctx context.Context, cmds []document.Command) []error
 }
 
 // Searcher defines the contract required to execute search queries.
@@ -163,7 +164,7 @@ func handleDocumentIngest(w http.ResponseWriter, r *http.Request, idx Indexer, l
 		logger.Field{Key: "document_id", Value: req.DocumentID},
 	)
 
-	w.WriteHeader(http.StatusAccepted)
+	w.WriteHeader(http.StatusOK)
 }
 
 // bulkIngestRequest matches the BulkIngestRequest from the documents package.
@@ -214,32 +215,33 @@ func handleBulkDocumentIngest(w http.ResponseWriter, r *http.Request, idx Indexe
 		return
 	}
 
-	response := bulkIngestResponse{}
-
-	for _, doc := range req.Documents {
-		// Pass raw payload bytes directly - validation happens at worker level
+	cmds := make([]document.Command, len(req.Documents))
+	for i, doc := range req.Documents {
 		rawPayload := doc.Payload
 		if len(rawPayload) == 0 {
 			rawPayload = []byte("{}")
 		}
-
-		cmd := document.Command{
+		cmds[i] = document.Command{
 			IndexID:    doc.IndexID,
 			ShardID:    doc.ShardID,
 			DocumentID: doc.DocumentID,
 			Routing:    doc.Routing,
 			RawPayload: rawPayload,
 		}
+	}
 
-		if err := idx.Index(r.Context(), cmd); err != nil {
+	docErrors := idx.IndexBulk(r.Context(), cmds)
+
+	response := bulkIngestResponse{}
+	for i, err := range docErrors {
+		if err != nil {
 			response.Errors = append(response.Errors, bulkDocError{
-				DocumentID: doc.DocumentID,
+				DocumentID: req.Documents[i].DocumentID,
 				Error:      err.Error(),
 			})
-			continue
+		} else {
+			response.Indexed++
 		}
-
-		response.Indexed++
 	}
 
 	log.Info("bulk documents ingested",
@@ -254,7 +256,7 @@ func handleBulkDocumentIngest(w http.ResponseWriter, r *http.Request, idx Indexe
 	} else if len(response.Errors) > 0 {
 		w.WriteHeader(http.StatusMultiStatus)
 	} else {
-		w.WriteHeader(http.StatusAccepted)
+		w.WriteHeader(http.StatusOK)
 	}
 	_ = json.NewEncoder(w).Encode(response)
 }

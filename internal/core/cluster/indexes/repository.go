@@ -75,15 +75,13 @@ func (r *Repository) CreateIndex(ctx context.Context, req CreateIndexRequest) (C
 		return CreateIndexResponse{}, err
 	}
 
-	refreshTimeMs := req.RefreshTime.Milliseconds()
-
 	_, err = tx.ExecContext(
 		ctx,
 		`INSERT INTO indexes (
 			id, name, shard_strategy, shard_template, shard_config,
-			default_analyzer, default_tokenizer, mapping_version, refresh_time,
+			default_analyzer, default_tokenizer, mapping_version,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.ID,
 		req.Name,
 		string(req.ShardStrategy),
@@ -92,7 +90,6 @@ func (r *Repository) CreateIndex(ctx context.Context, req CreateIndexRequest) (C
 		req.DefaultAnalyzer,
 		req.DefaultTokenizer,
 		mappingVersion,
-		refreshTimeMs,
 		now,
 		now,
 	)
@@ -131,7 +128,7 @@ func (r *Repository) CreateIndex(ctx context.Context, req CreateIndexRequest) (C
 func (r *Repository) GetIndex(ctx context.Context, id string) (IndexDefinition, error) {
 	const query = `SELECT
 		id, name, shard_strategy, shard_template, shard_config,
-		default_analyzer, default_tokenizer, mapping_version, refresh_time,
+		default_analyzer, default_tokenizer, mapping_version,
 		created_at, updated_at
 	FROM indexes WHERE id = ?`
 
@@ -142,7 +139,6 @@ func (r *Repository) GetIndex(ctx context.Context, id string) (IndexDefinition, 
 
 	row := r.db.QueryRowContext(ctx, query, id)
 	var rawConfig sql.NullString
-	var refreshTimeMs int64
 	if scanErr := row.Scan(
 		&def.ID,
 		&def.Name,
@@ -152,7 +148,6 @@ func (r *Repository) GetIndex(ctx context.Context, id string) (IndexDefinition, 
 		&def.DefaultAnalyzer,
 		&def.DefaultTokenizer,
 		&def.MappingVersion,
-		&refreshTimeMs,
 		&def.CreatedAt,
 		&def.UpdatedAt,
 	); scanErr != nil {
@@ -161,8 +156,6 @@ func (r *Repository) GetIndex(ctx context.Context, id string) (IndexDefinition, 
 		}
 		return IndexDefinition{}, fmt.Errorf("scan index: %w", scanErr)
 	}
-
-	def.RefreshTime = time.Duration(refreshTimeMs) * time.Millisecond
 
 	fields, err := r.loadFieldMappings(ctx, id)
 	if err != nil {
@@ -181,7 +174,7 @@ func (r *Repository) GetIndex(ctx context.Context, id string) (IndexDefinition, 
 func (r *Repository) ListIndexes(ctx context.Context) ([]IndexDefinition, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT
 		id, name, shard_strategy, shard_template, shard_config,
-		default_analyzer, default_tokenizer, mapping_version, refresh_time,
+		default_analyzer, default_tokenizer, mapping_version,
 		created_at, updated_at
 		FROM indexes
 		ORDER BY created_at ASC`)
@@ -199,7 +192,6 @@ func (r *Repository) ListIndexes(ctx context.Context) ([]IndexDefinition, error)
 			def           IndexDefinition
 			shardStrategy string
 			shardConfig   sql.NullString
-			refreshTimeMs int64
 		)
 		if err := rows.Scan(
 			&def.ID,
@@ -210,7 +202,6 @@ func (r *Repository) ListIndexes(ctx context.Context) ([]IndexDefinition, error)
 			&def.DefaultAnalyzer,
 			&def.DefaultTokenizer,
 			&def.MappingVersion,
-			&refreshTimeMs,
 			&def.CreatedAt,
 			&def.UpdatedAt,
 		); err != nil {
@@ -218,7 +209,6 @@ func (r *Repository) ListIndexes(ctx context.Context) ([]IndexDefinition, error)
 		}
 
 		def.ShardStrategy = ShardStrategy(shardStrategy)
-		def.RefreshTime = time.Duration(refreshTimeMs) * time.Millisecond
 		rawConfigs[def.ID] = shardConfig.String
 		defs = append(defs, def)
 	}

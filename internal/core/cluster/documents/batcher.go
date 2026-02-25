@@ -14,63 +14,51 @@ import (
 	"plastic-engine-core/internal/pkg/logger"
 )
 
-// BatcherConfig holds configuration for the DocumentBatcher.
 type BatcherConfig struct {
-	MaxBatchSize int           // Maximum documents per batch before flush (default: 100)
-	MaxWaitTime  time.Duration // Maximum wait time before flush (default: 10ms)
+	MaxBatchSize int
+	MaxWaitTime  time.Duration
 }
 
-// DefaultBatcherConfig returns sensible defaults for batching.
 func DefaultBatcherConfig() BatcherConfig {
 	return BatcherConfig{
 		MaxBatchSize: 100,
-		MaxWaitTime:  10 * time.Millisecond,
+		MaxWaitTime:  1 * time.Millisecond,
 	}
 }
 
-// BatchDocument represents a document to be sent in a batch.
-// The Payload is forwarded as raw bytes - validation happens at the search node.
 type BatchDocument struct {
 	IndexID    string            `json:"index_id"`
 	ShardID    string            `json:"shard_id"`
 	DocumentID string            `json:"document_id"`
 	Routing    map[string]string `json:"routing,omitempty"`
-	Payload    json.RawMessage   `json:"payload"` // Raw bytes, no parsing at coordinator
+	Payload    json.RawMessage   `json:"payload"`
 }
 
-// BulkIngestRequest is the payload sent to the /documents/bulk endpoint.
 type BulkIngestRequest struct {
 	Documents []BatchDocument `json:"documents"`
 }
 
-// BulkIngestResponse is the response from the /documents/bulk endpoint.
 type BulkIngestResponse struct {
 	Indexed int            `json:"indexed"`
 	Errors  []BulkDocError `json:"errors,omitempty"`
 }
 
-// BulkDocError represents an error for a specific document in a bulk request.
 type BulkDocError struct {
 	DocumentID string `json:"document_id"`
 	Error      string `json:"error"`
 }
 
-// DocumentBatcher groups documents by destination node and flushes batches
-// when they reach a size threshold or time limit.
 type DocumentBatcher struct {
 	config     BatcherConfig
 	httpClient *http.Client
 	log        logger.Logger
 
 	mu      sync.Mutex
-	batches map[string]*nodeBatch // key: nodeID
+	batches map[string]*nodeBatch
 	closed  bool
 
-	// Track in-flight flush goroutines so FlushWait can block until they finish.
 	inflightWg sync.WaitGroup
-
-	// Limits concurrent HTTP requests to search nodes (prevents flooding).
-	flushSema chan struct{}
+	flushSema  chan struct{}
 }
 
 type nodeBatch struct {
@@ -78,11 +66,10 @@ type nodeBatch struct {
 	nodeAddr  string
 	documents []BatchDocument
 	timer     *time.Timer
-	errCh     chan error // Channel to communicate flush errors back to callers
-	pending   int        // Number of callers waiting for flush
+	errCh     chan error
+	pending   int
 }
 
-// NewDocumentBatcher creates a new batcher with the given configuration.
 func NewDocumentBatcher(httpClient *http.Client, cfg BatcherConfig, log logger.Logger) *DocumentBatcher {
 	if cfg.MaxBatchSize <= 0 {
 		cfg.MaxBatchSize = 100
@@ -98,12 +85,13 @@ func NewDocumentBatcher(httpClient *http.Client, cfg BatcherConfig, log logger.L
 		httpClient: httpClient,
 		log:        log,
 		batches:    make(map[string]*nodeBatch),
-		flushSema:  make(chan struct{}, 16), // max 16 concurrent HTTP requests to search nodes
+		flushSema:  make(chan struct{}, 16),
 	}
 }
 
-// Add queues a document for batched delivery to the specified node.
-// The method may block briefly if a flush is in progress.
+// Add queues a document for batched delivery and blocks until the batch is
+// flushed to the search node. Multiple concurrent callers sharing the same
+// batch window are grouped into a single HTTP request.
 func (b *DocumentBatcher) Add(ctx context.Context, nodeID, nodeAddr string, doc BatchDocument) error {
 	b.mu.Lock()
 
@@ -116,43 +104,8 @@ func (b *DocumentBatcher) Add(ctx context.Context, nodeID, nodeAddr string, doc 
 	batch.documents = append(batch.documents, doc)
 	batch.pending++
 
-	// Check if we should flush immediately due to size
-	if len(batch.documents) >= b.config.MaxBatchSize {
-		// Stop the timer since we're flushing now
-		if batch.timer != nil {
-			batch.timer.Stop()
-			batch.timer = nil
-		}
-		b.flushBatchLocked(batch)
-		b.mu.Unlock()
-		return nil
-	}
-
-	// Ensure timer is running
-	b.ensureTimerLocked(batch)
-	b.mu.Unlock()
-
-	return nil
-}
-
-// AddSync queues a document and waits for the batch to be flushed.
-// Returns any error that occurred during the flush.
-func (b *DocumentBatcher) AddSync(ctx context.Context, nodeID, nodeAddr string, doc BatchDocument) error {
-	b.mu.Lock()
-
-	if b.closed {
-		b.mu.Unlock()
-		return fmt.Errorf("batcher is closed")
-	}
-
-	batch := b.getOrCreateBatchLocked(nodeID, nodeAddr)
-	batch.documents = append(batch.documents, doc)
-	batch.pending++
-
-	// Get the error channel before potentially flushing
 	errCh := batch.errCh
 
-	// Check if we should flush immediately due to size
 	if len(batch.documents) >= b.config.MaxBatchSize {
 		if batch.timer != nil {
 			batch.timer.Stop()
@@ -161,7 +114,6 @@ func (b *DocumentBatcher) AddSync(ctx context.Context, nodeID, nodeAddr string, 
 		b.flushBatchLocked(batch)
 		b.mu.Unlock()
 
-		// Wait for flush result
 		select {
 		case err := <-errCh:
 			return err
@@ -170,11 +122,9 @@ func (b *DocumentBatcher) AddSync(ctx context.Context, nodeID, nodeAddr string, 
 		}
 	}
 
-	// Ensure timer is running
 	b.ensureTimerLocked(batch)
 	b.mu.Unlock()
 
-	// Wait for flush result
 	select {
 	case err := <-errCh:
 		return err
@@ -206,7 +156,6 @@ func (b *DocumentBatcher) ensureTimerLocked(batch *nodeBatch) {
 		b.mu.Lock()
 		defer b.mu.Unlock()
 
-		// Check if batch still exists and has documents
 		if currentBatch, ok := b.batches[batch.nodeID]; ok && len(currentBatch.documents) > 0 {
 			currentBatch.timer = nil
 			b.flushBatchLocked(currentBatch)
@@ -219,19 +168,16 @@ func (b *DocumentBatcher) flushBatchLocked(batch *nodeBatch) {
 		return
 	}
 
-	// Capture the current state
 	docs := batch.documents
 	errCh := batch.errCh
 	pending := batch.pending
 	nodeAddr := batch.nodeAddr
 	nodeID := batch.nodeID
 
-	// Reset the batch for new documents
 	batch.documents = make([]BatchDocument, 0, b.config.MaxBatchSize)
 	batch.errCh = make(chan error, b.config.MaxBatchSize)
 	batch.pending = 0
 
-	// Flush asynchronously (tracked by inflightWg for FlushWait)
 	b.inflightWg.Add(1)
 	go b.doFlush(nodeID, nodeAddr, docs, errCh, pending)
 }
@@ -240,13 +186,11 @@ func (b *DocumentBatcher) doFlush(nodeID, nodeAddr string, docs []BatchDocument,
 	defer b.inflightWg.Done()
 	defer close(errCh)
 
-	// Limit concurrent HTTP requests to search nodes
 	b.flushSema <- struct{}{}
 	defer func() { <-b.flushSema }()
 
 	err := b.sendBulkRequest(nodeAddr, docs)
 
-	// Send result to all waiting callers
 	for i := 0; i < pending; i++ {
 		errCh <- err
 	}
@@ -286,7 +230,7 @@ func (b *DocumentBatcher) sendBulkRequest(nodeAddr string, docs []BatchDocument)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= http.StatusMultipleChoices {
+	if resp.StatusCode != http.StatusOK {
 		slurp, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		return fmt.Errorf("bulk request to %s returned %d: %s", nodeAddr, resp.StatusCode, string(slurp))
 	}
@@ -294,29 +238,7 @@ func (b *DocumentBatcher) sendBulkRequest(nodeAddr string, docs []BatchDocument)
 	return nil
 }
 
-// Flush forces all pending batches to be sent immediately (non-blocking).
-func (b *DocumentBatcher) Flush() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	for _, batch := range b.batches {
-		if batch.timer != nil {
-			batch.timer.Stop()
-			batch.timer = nil
-		}
-		b.flushBatchLocked(batch)
-	}
-}
-
-// FlushWait flushes all pending batches and blocks until every in-flight
-// HTTP request to search nodes has completed. This provides backpressure:
-// the caller cannot send more documents until the previous wave is accepted.
-func (b *DocumentBatcher) FlushWait() {
-	b.Flush()
-	b.inflightWg.Wait()
-}
-
-// Close stops the batcher, flushes remaining documents, and waits for completion.
+// Close flushes remaining pending batches and waits for all in-flight requests to finish.
 func (b *DocumentBatcher) Close() {
 	b.mu.Lock()
 	b.closed = true
@@ -331,24 +253,4 @@ func (b *DocumentBatcher) Close() {
 	b.mu.Unlock()
 
 	b.inflightWg.Wait()
-}
-
-// Stats returns current batching statistics.
-type BatcherStats struct {
-	ActiveBatches  int
-	PendingDocs    int
-}
-
-// Stats returns current batching statistics.
-func (b *DocumentBatcher) Stats() BatcherStats {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	stats := BatcherStats{
-		ActiveBatches: len(b.batches),
-	}
-	for _, batch := range b.batches {
-		stats.PendingDocs += len(batch.documents)
-	}
-	return stats
 }

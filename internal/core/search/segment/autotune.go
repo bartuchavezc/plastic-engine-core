@@ -2,6 +2,7 @@ package segment
 
 import (
 	"bufio"
+	"fmt"
 	"math"
 	"os"
 	"runtime"
@@ -45,6 +46,17 @@ type NodeConfig struct {
 	FlushThreshold      int
 	MergeWorkers        int
 	FlushInterval       time.Duration
+	MergeInterval       time.Duration
+}
+
+// String returns a human-readable summary of the tuned configuration.
+func (c NodeConfig) String() string {
+	return fmt.Sprintf(
+		"workers=%d batch=%d queue=%d flushConc=%d flushBytes=%dMB flushDocs=%d mergeWorkers=%d flushInterval=%s mergeInterval=%s",
+		c.WorkerMaxWorkers, c.WorkerMaxBatchSize, c.WorkerQueueCapacity,
+		c.FlushConcurrency, c.FlushThresholdBytes/(1024*1024),
+		c.FlushThreshold, c.MergeWorkers, c.FlushInterval, c.MergeInterval,
+	)
 }
 
 // SegmentCfg returns a segment.Config derived from this NodeConfig.
@@ -55,6 +67,7 @@ func (c NodeConfig) SegmentCfg() Config {
 	cfg.FlushThreshold = c.FlushThreshold
 	cfg.MergeWorkers = c.MergeWorkers
 	cfg.FlushInterval = c.FlushInterval
+	cfg.MergeInterval = c.MergeInterval
 	return cfg
 }
 
@@ -85,35 +98,44 @@ func TuneForNode(profile NodeResourceProfile) NodeConfig {
 		shards = 4
 	}
 
-	// Indexing memory budget: 6% of total RAM, mirroring Elasticsearch's index buffer policy.
-	// Each shard has 2 MemSegment generations in flight simultaneously (active + flushing).
-	// GC pressure adds ~1.5× peak live heap, so we budget conservatively.
-	// 2GB/4shards → 122MB total / 8 = ~15MB per shard  ✓
-	// 8GB/4shards → 491MB total / 8 = ~61MB per shard  ✓
-	// 128GB/8shards → capped at 256MB per shard         ✓
-	totalIndexingMB := memMB * 6 / 100
-	flushBytes := clampInt64(totalIndexingMB*1024*1024/(int64(shards)*2), 8*1024*1024, 256*1024*1024)
+	// Indexing memory budget: 30% of total RAM for MemSegment buffers.
+	// Each shard has 2 MemSegment generations in flight (active + flushing).
+	// PebbleTermRegistry is heap-light, so we can dedicate more RAM to indexing.
+	// needsFlush() applies a 2x correction for Go map/GC overhead.
+	//
+	// 3800MB/4shards: 3800*30%/(4*2) ≈ 142MB per shard
+	// 7600MB/4shards: 7600*30%/(4*2) ≈ 285MB per shard
+	totalIndexingMB := memMB * 30 / 100
+	flushBytes := clampInt64(totalIndexingMB*1024*1024/(int64(shards)*2), 16*1024*1024, 512*1024*1024)
 
 	// MaxBatchSize: docs to accumulate before flushing.
 	// Assumes ~200KB average tokenized doc (realistic with ngrams).
-	// Range: [32, 1024]
-	maxBatch := clampInt(int(flushBytes/(200*1024)), 32, 1024)
+	// Range: [32, 2048]
+	maxBatch := clampInt(int(flushBytes/(200*1024)), 32, 2048)
 
-	// Worker goroutines for parallel tokenization — half CPUs, leave rest for searches.
+	// Worker goroutines for parallel tokenization.
+	// With bulk ingestion as primary workload, use all CPUs for tokenization.
+	// Tokenization goroutines yield naturally (short-lived per-doc work items),
+	// so merge/flush goroutines can schedule on any CPU without a reserved core.
 	// Range: [2, 32]
-	maxWorkers := clampInt(cpus/2, 2, 32)
+	maxWorkers := clampInt(max(cpus, 2), 2, 32)
 
 	// Concurrent flush operations across all shards.
-	// MUST be >= number of shards to avoid serializing flushes: if only 1 flush
-	// runs at a time, the other shards' flushLoops block on the semaphore and
-	// can't service their queues → ErrBackpressure → doc drops.
-	// Floor at 4 (matches typical shard count) regardless of CPU count.
+	// MUST be >= number of shards to avoid serializing flushes.
+	// With more CPUs, allow more concurrent flushes.
 	// Range: [4, 16]
-	flushConcurrency := clampInt(max(cpus, 4), 4, 16)
+	flushConcurrency := clampInt(max(cpus*2, 4), 4, 16)
 
-	// Merge workers: I/O-bound, can be modest.
+	// Merge workers: I/O-bound, scale with CPUs but stay modest.
+	// With buffered iterator I/O, merges are faster → can afford fewer workers.
 	// Range: [1, 8]
-	mergeWorkers := clampInt(cpus/2, 1, 8)
+	mergeWorkers := clampInt(max(cpus/2, 2), 1, 8)
+
+	// Merge interval: how often the merge scheduler checks for work (in addition
+	// to event-driven signals from flushes). During high ingestion, segments
+	// accumulate fast → check frequently so merges don't fall behind.
+	// 5s keeps the merge pipeline responsive without burning CPU on idle checks.
+	mergeInterval := 5 * time.Second
 
 	// Queue capacity: must absorb a full burst (e.g. 1K docs/request) without
 	// backpressure. Items in queue are raw (pre-tokenization, ~1-2KB each),
@@ -121,15 +143,21 @@ func TuneForNode(profile NodeResourceProfile) NodeConfig {
 	// Range: [2048, 8192]
 	queueCapacity := clampInt(max(maxBatch*16, 2048), 2048, 8192)
 
+	// FlushThreshold: scale with flush budget.
+	// Let FlushThresholdBytes be the primary trigger — set doc threshold high
+	// so it only kicks in as a safety net for tiny documents.
+	flushThreshold := clampInt(int(flushBytes/500), 10_000, 200_000)
+
 	return NodeConfig{
 		WorkerMaxWorkers:    maxWorkers,
 		WorkerMaxBatchSize:  maxBatch,
 		WorkerQueueCapacity: queueCapacity,
 		FlushConcurrency:    flushConcurrency,
 		FlushThresholdBytes: flushBytes,
-		FlushThreshold:      5000,
+		FlushThreshold:      flushThreshold,
 		MergeWorkers:        mergeWorkers,
 		FlushInterval:       10 * time.Second,
+		MergeInterval:       mergeInterval,
 	}
 }
 

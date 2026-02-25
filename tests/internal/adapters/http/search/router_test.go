@@ -50,8 +50,8 @@ func TestDocumentsEndpointCallsIndexer(t *testing.T) {
 
 	router.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusAccepted {
-		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusAccepted)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusOK)
 	}
 
 	if len(idx.commands) != 1 {
@@ -70,6 +70,15 @@ type stubIndexer struct {
 func (s *stubIndexer) Index(ctx context.Context, cmd document.Command) error {
 	s.commands = append(s.commands, cmd)
 	return s.err
+}
+
+func (s *stubIndexer) IndexBulk(ctx context.Context, cmds []document.Command) []error {
+	errs := make([]error, len(cmds))
+	for i, cmd := range cmds {
+		s.commands = append(s.commands, cmd)
+		errs[i] = s.err
+	}
+	return errs
 }
 
 func TestTermLookupEndpoint(t *testing.T) {

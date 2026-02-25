@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -104,6 +105,15 @@ func Observability(cfg Config) func(http.Handler) http.Handler {
 
 			duration := time.Since(start)
 
+			// Use chi route pattern for metrics (low cardinality) instead of
+			// the raw path which includes unique IDs and causes histogram explosion.
+			metricsPath := r.URL.Path
+			if rctx := chi.RouteContext(ctx); rctx != nil {
+				if pattern := rctx.RoutePattern(); pattern != "" {
+					metricsPath = pattern
+				}
+			}
+
 			// Add response attributes to span
 			span.SetAttributes(
 				semconv.HTTPStatusCodeKey.Int(wrapped.statusCode),
@@ -120,7 +130,7 @@ func Observability(cfg Config) func(http.Handler) http.Handler {
 
 			// Record metrics
 			if cfg.Metrics != nil {
-				cfg.Metrics.RecordRequest(ctx, r.Method, r.URL.Path, wrapped.statusCode, duration, r.ContentLength, wrapped.bytesWritten)
+				cfg.Metrics.RecordRequest(ctx, r.Method, metricsPath, wrapped.statusCode, duration, r.ContentLength, wrapped.bytesWritten)
 			}
 
 			// Log request with trace correlation

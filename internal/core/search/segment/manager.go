@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
+	rmetrics "runtime/metrics"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -14,6 +16,9 @@ import (
 
 	"plastic-engine-core/internal/adapters/telemetry/metrics"
 	"plastic-engine-core/internal/core/search/wal"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // mergeHeapItem represents a term from one segment in the merge heap.
@@ -52,7 +57,8 @@ type mergeJob struct {
 
 // Manager orchestrates segments, handling indexing, searching, and merging.
 type Manager struct {
-	mu sync.RWMutex
+	activeMu sync.Mutex   // protects: m.active (ingestion hot path)
+	segMu    sync.RWMutex // protects: m.segments (read by search, written by flush/merge)
 
 	// Active segment (receives writes)
 	active *MemSegment
@@ -85,6 +91,10 @@ type Manager struct {
 	// Track segments being merged to avoid double-selection
 	mergingMu sync.Mutex
 	merging   map[string]bool
+
+	// Heap pressure monitor: 0=none, 1=medium (reduce thresholds), 2=high (emergency flush)
+	pressureLevel atomic.Int32
+	memLimitBytes int64 // GOMEMLIMIT in bytes; 0 = monitor disabled
 
 	// Stats
 	indexedDocs atomic.Int64
@@ -129,17 +139,12 @@ func NewManager(config Config) (*Manager, error) {
 		registry = config.TermRegistry
 		ownsRegistry = false
 	} else {
-		// Create our own registry (legacy behavior)
+		// Create a Pebble-backed term registry.
+		// Data lives in <DataDir>/registry/pebble/ — separate from old FST files.
 		registryDir := filepath.Join(config.DataDir, "registry")
 
-		mergeConfig := DefaultMergeConfig()
-		if config.TermRegistryMergeConfig != nil {
-			mergeConfig = *config.TermRegistryMergeConfig
-		}
-
-		newRegistry, err := NewCacheFSTRegistry(CacheFSTConfig{
-			DataDir:     registryDir,
-			MergeConfig: mergeConfig,
+		newRegistry, err := NewPebbleTermRegistry(PebbleRegistryConfig{
+			DataDir: registryDir,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("create term registry: %w", err)
@@ -149,10 +154,14 @@ func NewManager(config Config) (*Manager, error) {
 	}
 
 	// Initialize WAL
+	// SyncNone: WAL buffers writes without fsync. Durability comes from segment flushes
+	// (WAL is truncated after each flush). SyncBatch was doing fsync every 1s via syncWorker,
+	// which could stall indexing for 5-50ms when it coincided with AppendDocuments.
+	// 256KB buffer absorbs larger batches without flushing to the OS page cache mid-write.
 	walPath := filepath.Join(config.DataDir, "active.wal")
 	activeWAL, err := wal.Open(walPath, wal.Options{
-		SyncMode:   wal.SyncBatch,
-		BufferSize: 64 * 1024,
+		SyncMode:   wal.SyncNone,
+		BufferSize: 256 * 1024,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open wal: %w", err)
@@ -179,6 +188,11 @@ func NewManager(config Config) (*Manager, error) {
 		mergeJobCh:   make(chan mergeJob, config.MergeWorkers*2),
 		closeCh:      make(chan struct{}),
 		merging:      make(map[string]bool),
+	}
+
+	// Read GOMEMLIMIT for the heap monitor (0 if not configured = disabled).
+	if limit := debug.SetMemoryLimit(-1); limit > 0 && limit < int64(^uint64(0)>>1) {
+		m.memLimitBytes = limit
 	}
 
 	// Load or create manifest
@@ -303,6 +317,10 @@ func (m *Manager) startBackgroundWorkers() {
 	// Periodic sync worker
 	m.wg.Add(1)
 	go m.syncWorker()
+
+	// Real-time heap pressure monitor (safety net for unaccounted memory)
+	m.wg.Add(1)
+	go m.heapMonitor()
 }
 
 // flushWorker handles flushing the active segment.
@@ -375,6 +393,51 @@ func (m *Manager) syncWorker() {
 	}
 }
 
+// heapMonitor watches runtime heap usage and sets pressureLevel.
+// Two levels with hysteresis:
+//   - medium (1): heap > 70%, exit below 60% — halves flush thresholds proactively
+//   - high   (2): heap > 85%, exit below 75% — emergency flush + backpressure
+//
+// Uses runtime/metrics (non-STW) instead of runtime.ReadMemStats.
+func (m *Manager) heapMonitor() {
+	defer m.wg.Done()
+	if m.memLimitBytes <= 0 {
+		return
+	}
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	sample := []rmetrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
+	for {
+		select {
+		case <-m.closeCh:
+			return
+		case <-ticker.C:
+			rmetrics.Read(sample)
+			heapInuse := int64(sample[0].Value.Uint64())
+			ratio := float64(heapInuse) / float64(m.memLimitBytes)
+
+			prev := m.pressureLevel.Load()
+			var level int32
+			switch {
+			case ratio > 0.85 || (prev >= 2 && ratio > 0.75):
+				level = 2 // high: emergency flush + backpressure
+			case ratio > 0.70 || (prev >= 1 && ratio > 0.60):
+				level = 1 // medium: reduce flush thresholds
+			default:
+				level = 0
+			}
+			m.pressureLevel.Store(level)
+
+			if level >= 2 {
+				select {
+				case m.flushCh <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}
+}
+
 // Index adds a document posting to the index.
 func (m *Manager) Index(ctx context.Context, field, term, docID string, tf int, positions []int) error {
 	if m.closed.Load() {
@@ -400,11 +463,11 @@ func (m *Manager) Index(ctx context.Context, field, term, docID string, tf int, 
 	}
 
 	// Add to active segment
-	m.mu.Lock()
+	m.activeMu.Lock()
 	m.active.Add(termID, docID, tf, positions)
 	docCount := m.active.DocCount()
 	estimatedBytes := m.active.EstimatedBytes()
-	m.mu.Unlock()
+	m.activeMu.Unlock()
 
 	// Update registry stats
 	m.registry.IncrementDF(termID, 1)
@@ -433,6 +496,8 @@ type DocumentBatch struct {
 //   - WAL writes use a single lock acquisition for the entire batch
 //   - Segment adds use a single lock acquisition via AddBatch
 //   - DF increments are aggregated per unique term
+var mgrTracer = otel.Tracer("search/segment-manager")
+
 func (m *Manager) IndexDocumentBatch(ctx context.Context, docs []DocumentBatch) error {
 	if m.closed.Load() {
 		return fmt.Errorf("manager is closed")
@@ -441,8 +506,17 @@ func (m *Manager) IndexDocumentBatch(ctx context.Context, docs []DocumentBatch) 
 		return nil
 	}
 
-	// Pre-calculate total postings to pre-allocate allEntries in one shot,
-	// avoiding repeated reallocs and over-allocation.
+	// Backpressure: under high memory pressure, yield to let flush/GC catch up.
+	// This converts a hard cliff (OOM/GC thrash) into a gentle slowdown.
+	if m.pressureLevel.Load() >= 2 {
+		select {
+		case m.flushCh <- struct{}{}:
+		default:
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Pre-calculate total postings to pre-allocate allEntries in one shot.
 	totalPostings := 0
 	for _, doc := range docs {
 		for _, terms := range doc.FieldTerms {
@@ -450,15 +524,59 @@ func (m *Manager) IndexDocumentBatch(ctx context.Context, docs []DocumentBatch) 
 		}
 	}
 
-	termCache := make(map[string]string, 64) // "field\x00term" -> termID (dedup across batch)
-	allEntries := make([]SegmentEntry, 0, totalPostings)
-	walOps := make([]wal.DocIndexOp, 0, len(docs))
-	dfDeltas := make(map[string]int64, 64) // termID -> delta (aggregated across all docs)
+	// Phase 1: Resolve terms, build segment entries, encode WAL data.
+	_, resolveSpan := mgrTracer.Start(ctx, "index.resolve_terms")
+	resolveSpan.SetAttributes(
+		attribute.Int("docs", len(docs)),
+		attribute.Int("postings", totalPostings),
+	)
 
-	// Single pass: resolve terms, build segment entries and WAL ops simultaneously.
-	// Previously we built a per-doc intermediate slice (allDocs[i].entries) and then
-	// copied everything into allEntries — doubling peak memory for the entries data.
-	// Now allEntries is built directly: one copy, one allocation.
+	// Collect unique terms for batch resolution.
+	uniqueTerms := make(map[string]TermLookup, totalPostings/2)
+	for _, doc := range docs {
+		for field, terms := range doc.FieldTerms {
+			for _, tp := range terms {
+				key := field + "\x00" + tp.Term
+				if _, exists := uniqueTerms[key]; !exists {
+					uniqueTerms[key] = TermLookup{Field: field, Term: tp.Term}
+				}
+			}
+		}
+	}
+
+	// Batch resolve: 1 sync.Map scan + 1 Pebble read pass + 1 Pebble batch write.
+	var termCache map[string]string
+	if pebbleReg, ok := m.registry.(*PebbleTermRegistry); ok {
+		lookups := make([]TermLookup, 0, len(uniqueTerms))
+		for _, tl := range uniqueTerms {
+			lookups = append(lookups, tl)
+		}
+		var err error
+		termCache, err = pebbleReg.GetOrCreateBatch(lookups)
+		if err != nil {
+			resolveSpan.End()
+			return fmt.Errorf("batch resolve terms: %w", err)
+		}
+	} else {
+		// Fallback: resolve one-by-one for non-Pebble registries.
+		termCache = make(map[string]string, len(uniqueTerms))
+		for key, tl := range uniqueTerms {
+			termID, err := m.registry.GetOrCreate(ctx, tl.Field, tl.Term)
+			if err != nil {
+				resolveSpan.End()
+				return fmt.Errorf("get or create term: %w", err)
+			}
+			termCache[key] = termID
+		}
+	}
+
+	resolveSpan.SetAttributes(attribute.Int("unique_terms", len(uniqueTerms)))
+
+	// Build segment entries and WAL data using resolved term IDs.
+	allEntries := make([]SegmentEntry, 0, totalPostings)
+	walEncoded := make([][]byte, 0, len(docs))
+	dfDeltas := make(map[string]int64, len(uniqueTerms))
+
 	for _, doc := range docs {
 		walFields := make([]wal.DocFieldTerms, 0, len(doc.FieldTerms))
 
@@ -466,17 +584,8 @@ func (m *Manager) IndexDocumentBatch(ctx context.Context, docs []DocumentBatch) 
 			walPostings := make([]wal.DocTermPosting, 0, len(terms))
 
 			for _, tp := range terms {
-				// Deduplicated term resolution: each unique field+term resolved once.
 				key := field + "\x00" + tp.Term
-				termID, ok := termCache[key]
-				if !ok {
-					var err error
-					termID, err = m.registry.GetOrCreate(ctx, field, tp.Term)
-					if err != nil {
-						return fmt.Errorf("get or create term: %w", err)
-					}
-					termCache[key] = termID
-				}
+				termID := termCache[key]
 
 				allEntries = append(allEntries, SegmentEntry{
 					TermID:    termID,
@@ -501,28 +610,40 @@ func (m *Manager) IndexDocumentBatch(ctx context.Context, docs []DocumentBatch) 
 			})
 		}
 
-		walOps = append(walOps, wal.DocIndexOp{
+		walEncoded = append(walEncoded, wal.EncodeDocIndexOp(wal.DocIndexOp{
 			DocID:  doc.DocID,
 			Fields: walFields,
-		})
+		}))
 	}
+	resolveSpan.End()
 
-	// Phase 2: Batch WAL write (single lock acquisition for all documents)
-	if _, err := m.wal.AppendDocuments(walOps); err != nil {
+	// Phase 2: WAL write
+	_, walSpan := mgrTracer.Start(ctx, "index.wal_write")
+	walSpan.SetAttributes(attribute.Int("docs", len(walEncoded)))
+	if _, err := m.wal.AppendPreEncodedDocuments(walEncoded); err != nil {
+		walSpan.End()
 		return fmt.Errorf("append docs to wal: %w", err)
 	}
-	walOps = nil // release WAL data before AddBatch to reduce peak memory
+	walEncoded = nil
+	walSpan.End()
 
-	// Phase 3: Add to active segment under single lock (AddBatch = 1 lock acquisition)
-	m.mu.Lock()
+	// Phase 3: AddBatch to MemSegment
+	_, addSpan := mgrTracer.Start(ctx, "index.add_batch")
+	addSpan.SetAttributes(attribute.Int("entries", len(allEntries)))
+	m.activeMu.Lock()
 	m.active.AddBatch(allEntries)
 	docCount := m.active.DocCount()
 	estimatedBytes := m.active.EstimatedBytes()
-	m.mu.Unlock()
+	m.activeMu.Unlock()
+	addSpan.End()
 
-	// Phase 4: Aggregated DF increments (one call per unique term, not per posting)
-	for termID, delta := range dfDeltas {
-		m.registry.IncrementDF(termID, delta)
+	// Phase 4: DF increments
+	if pebbleReg, ok := m.registry.(*PebbleTermRegistry); ok {
+		pebbleReg.IncrementDFBatch(dfDeltas)
+	} else {
+		for termID, delta := range dfDeltas {
+			m.registry.IncrementDF(termID, delta)
+		}
 	}
 
 	m.indexedDocs.Add(int64(len(docs)))
@@ -573,11 +694,14 @@ var searchSema = make(chan struct{}, 8)
 
 // SearchByTermID searches using a term ID directly.
 func (m *Manager) SearchByTermID(termID string) ([]Hit, error) {
-	m.mu.RLock()
+	m.activeMu.Lock()
 	active := m.active
+	m.activeMu.Unlock()
+
+	m.segMu.RLock()
 	segments := make([]*DiskSegment, len(m.segments))
 	copy(segments, m.segments)
-	m.mu.RUnlock()
+	m.segMu.RUnlock()
 
 	var allHits []Hit
 
@@ -623,12 +747,35 @@ func (m *Manager) CreateAlias(field, newTerm, existingTermID string) error {
 	return m.registry.CreateAlias(field, newTerm, existingTermID)
 }
 
+// UpdateFlushThresholds allows the shard manager to adjust flush thresholds
+// after re-tuning with the real shard count (known after first Sync).
+func (m *Manager) UpdateFlushThresholds(flushBytes int64, flushDocs int) {
+	m.config.FlushThresholdBytes = flushBytes
+	m.config.FlushThreshold = flushDocs
+}
+
 // needsFlush returns true if the active segment should be flushed.
 func (m *Manager) needsFlush(docCount int, estimatedBytes int64) bool {
-	if docCount >= m.config.FlushThreshold {
+	pressure := m.pressureLevel.Load()
+	if pressure >= 2 {
+		return true // emergency
+	}
+
+	// estimatedBytes subestima heap real de Go por map/string/GC overhead.
+	// 2x correction: AddBatch is now append-only (no dedup maps), reducing alloc overhead.
+	correctedBytes := estimatedBytes * 2
+
+	flushDocs := m.config.FlushThreshold
+	flushBytes := m.config.FlushThresholdBytes
+	if pressure >= 1 {
+		flushDocs /= 2   // flush at half thresholds under medium pressure
+		flushBytes /= 2
+	}
+
+	if docCount >= flushDocs {
 		return true
 	}
-	if m.config.FlushThresholdBytes > 0 && estimatedBytes >= m.config.FlushThresholdBytes {
+	if flushBytes > 0 && correctedBytes >= flushBytes {
 		return true
 	}
 	return false
@@ -636,10 +783,10 @@ func (m *Manager) needsFlush(docCount int, estimatedBytes int64) bool {
 
 // maybeFlush checks if flush is needed.
 func (m *Manager) maybeFlush() {
-	m.mu.RLock()
+	m.activeMu.Lock()
 	docCount := m.active.DocCount()
 	estimatedBytes := m.active.EstimatedBytes()
-	m.mu.RUnlock()
+	m.activeMu.Unlock()
 
 	if m.needsFlush(docCount, estimatedBytes) {
 		m.doFlush()
@@ -648,9 +795,9 @@ func (m *Manager) maybeFlush() {
 
 // doFlush flushes the active segment to disk.
 func (m *Manager) doFlush() {
-	m.mu.Lock()
+	m.activeMu.Lock()
 	if m.active.DocCount() == 0 {
-		m.mu.Unlock()
+		m.activeMu.Unlock()
 		return
 	}
 
@@ -660,7 +807,7 @@ func (m *Manager) doFlush() {
 	newActiveID := fmt.Sprintf("mem_%d", time.Now().UnixNano())
 	m.active = NewMemSegment(newActiveID)
 	m.manifest.ActiveID = newActiveID
-	m.mu.Unlock()
+	m.activeMu.Unlock()
 
 	flushStart := time.Now()
 
@@ -669,11 +816,15 @@ func (m *Manager) doFlush() {
 	diskSeg, err := FlushMemSegment(oldActive, segmentDir)
 	if err != nil {
 		// Put it back if flush failed
-		m.mu.Lock()
+		m.activeMu.Lock()
 		m.active = oldActive
-		m.mu.Unlock()
+		m.activeMu.Unlock()
 		return
 	}
+
+	// Release old MemSegment maps immediately so GC can collect them
+	// before the next allocation spike.
+	oldActive.Clear()
 
 	// Record flush metrics
 	if mp := metrics.Global(); mp != nil {
@@ -681,9 +832,9 @@ func (m *Manager) doFlush() {
 	}
 
 	// Add to segments list
-	m.mu.Lock()
+	m.segMu.Lock()
 	m.segments = append(m.segments, diskSeg)
-	m.mu.Unlock()
+	m.segMu.Unlock()
 
 	// Update manifest
 	m.manifest.mu.Lock()
@@ -703,8 +854,9 @@ func (m *Manager) doFlush() {
 	// Save manifest
 	m.manifest.Save()
 
-	// Truncate WAL
-	m.wal.Truncate()
+	// Truncate WAL in background — the segment is already persisted and manifest saved,
+	// so new writes to WAL will just be replayed harmlessly if we crash before truncation.
+	go m.wal.Truncate()
 
 	// Trigger merge check
 	select {
@@ -716,10 +868,10 @@ func (m *Manager) doFlush() {
 // scheduleMerge finds merge candidates and submits jobs to the merge pool.
 // Runs in the merge scheduler goroutine — no heavy I/O here.
 func (m *Manager) scheduleMerge() {
-	m.mu.RLock()
+	m.segMu.RLock()
 	segments := make([]*DiskSegment, len(m.segments))
 	copy(segments, m.segments)
-	m.mu.RUnlock()
+	m.segMu.RUnlock()
 
 	m.mergingMu.Lock()
 	defer m.mergingMu.Unlock()
@@ -734,19 +886,32 @@ func (m *Manager) scheduleMerge() {
 		levels[level] = append(levels[level], seg)
 	}
 
-	// Submit merge jobs for all levels that need it
+	// Submit merge jobs for levels that exceed MaxSegmentsPerLevel.
+	// Merge all segments at the level (up to MaxSegmentsPerLevel) to clear the
+	// backlog completely. With maxMergeBatch=3 (previous), L0 never fully cleared:
+	// 5 segs → merge 3 → 2+1=3 left < threshold → stall until 5 again.
+	// Now: 5 segs → merge 5 → 1 at L1, L0 is clean.
 	for level, segs := range levels {
 		if len(segs) >= m.config.MaxSegmentsPerLevel {
+			maxBatch := m.config.MaxSegmentsPerLevel
+			if level > 0 {
+				maxBatch = 3 // larger segments → smaller batches to bound merge time
+			}
+			batch := segs
+			if len(batch) > maxBatch {
+				batch = batch[:maxBatch]
+			}
+
 			// Mark segments as merging
-			for _, seg := range segs {
+			for _, seg := range batch {
 				m.merging[seg.ID()] = true
 			}
 
 			select {
-			case m.mergeJobCh <- mergeJob{segments: segs, level: level + 1}:
+			case m.mergeJobCh <- mergeJob{segments: batch, level: level + 1}:
 			default:
 				// Pool busy, unmark and try later
-				for _, seg := range segs {
+				for _, seg := range batch {
 					delete(m.merging, seg.ID())
 				}
 			}
@@ -779,8 +944,12 @@ func (m *Manager) executeMerge(job mergeJob) {
 		oldIDs[seg.ID()] = true
 	}
 
-	m.mu.Lock()
-	newSegments := make([]*DiskSegment, 0, len(m.segments)-len(job.segments)+1)
+	m.segMu.Lock()
+	capHint := len(m.segments) - len(job.segments) + 1
+	if capHint < 1 {
+		capHint = 1
+	}
+	newSegments := make([]*DiskSegment, 0, capHint)
 	oldPaths := make([]string, 0, len(job.segments))
 
 	for _, s := range m.segments {
@@ -792,21 +961,22 @@ func (m *Manager) executeMerge(job mergeJob) {
 	}
 	newSegments = append(newSegments, merged)
 	m.segments = newSegments
-	m.mu.Unlock()
+	m.segMu.Unlock()
 
 	// Phase 3: Update manifest
 	m.updateManifestAfterMerge(job.segments, merged)
 
-	// Phase 4: Cleanup old segments after delay
-	go func(paths []string, oldSegs []*DiskSegment) {
+	// Phase 4: Close old segments immediately to free termDict + file handles,
+	// but delay file deletion for in-flight readers.
+	for _, seg := range job.segments {
+		seg.Close()
+	}
+	go func(paths []string) {
 		time.Sleep(5 * time.Second)
-		for _, seg := range oldSegs {
-			seg.Close()
-		}
 		for _, path := range paths {
 			os.Remove(path)
 		}
-	}(oldPaths, job.segments)
+	}(oldPaths)
 
 	// Record merge metrics
 	if mp := metrics.Global(); mp != nil {
@@ -876,18 +1046,22 @@ func (m *Manager) mergeSegments(segments []*DiskSegment, newLevel int) (*DiskSeg
 			return nil
 		}
 
-		// Deduplicate postings by doc ID (keep latest)
-		postingMap := make(map[string]Posting, len(currentPostings))
-		for _, p := range currentPostings {
-			postingMap[p.DocID] = p
+		// Dedup in-place: postings from each segment are already sorted by DocID.
+		// Keep last occurrence of each DocID (latest segment wins).
+		if len(currentPostings) > 1 {
+			j := 0
+			for i := 1; i < len(currentPostings); i++ {
+				if currentPostings[i].DocID == currentPostings[j].DocID {
+					currentPostings[j] = currentPostings[i] // overwrite with latest
+				} else {
+					j++
+					currentPostings[j] = currentPostings[i]
+				}
+			}
+			currentPostings = currentPostings[:j+1]
 		}
 
-		dedupedPostings := make([]Posting, 0, len(postingMap))
-		for _, p := range postingMap {
-			dedupedPostings = append(dedupedPostings, p)
-		}
-
-		if err := writer.AddTerm(currentTermID, dedupedPostings, currentDF); err != nil {
+		if err := writer.AddTermSorted(currentTermID, currentPostings, currentDF); err != nil {
 			return err
 		}
 		termCount++
@@ -947,13 +1121,12 @@ func (m *Manager) mergeSegments(segments []*DiskSegment, newLevel int) (*DiskSeg
 		return nil, err
 	}
 
-	return OpenDiskSegment(path)
+	return OpenDiskSegmentLazy(path)
 }
 
 // updateManifestAfterMerge updates the manifest after a merge.
 func (m *Manager) updateManifestAfterMerge(old []*DiskSegment, merged *DiskSegment) {
 	m.manifest.mu.Lock()
-	defer m.manifest.mu.Unlock()
 
 	oldIDs := make(map[string]bool)
 	for _, seg := range old {
@@ -982,7 +1155,10 @@ func (m *Manager) updateManifestAfterMerge(old []*DiskSegment, merged *DiskSegme
 	m.manifest.Segments = newEntries
 	m.manifest.Version++
 	m.manifest.UpdatedAt = time.Now().UTC()
+	m.manifest.mu.Unlock()
 
+	// Save manifest outside the write lock — Save() acquires its own RLock
+	// for serialization. This matches the pattern used by doFlush (lines 742-757).
 	m.manifest.Save()
 }
 
@@ -1015,11 +1191,11 @@ func (m *Manager) Close() error {
 	}
 
 	// Close all segments
-	m.mu.Lock()
+	m.segMu.Lock()
 	for _, seg := range m.segments {
 		seg.Close()
 	}
-	m.mu.Unlock()
+	m.segMu.Unlock()
 
 	// Save manifest
 	m.manifest.Save()
@@ -1029,25 +1205,29 @@ func (m *Manager) Close() error {
 
 // Stats returns manager statistics.
 func (m *Manager) Stats() ManagerStats {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.activeMu.Lock()
+	activeDocCount := m.active.DocCount()
+	activeTermCount := m.active.TermCount()
+	m.activeMu.Unlock()
 
-	stats := ManagerStats{
-		ActiveDocCount:  m.active.DocCount(),
-		ActiveTermCount: m.active.TermCount(),
-		DiskSegments:    len(m.segments),
+	m.segMu.RLock()
+	diskSegments := len(m.segments)
+	totalDiskDocs := 0
+	for _, seg := range m.segments {
+		totalDiskDocs += seg.DocCount()
+	}
+	m.segMu.RUnlock()
+
+	return ManagerStats{
+		ActiveDocCount:  activeDocCount,
+		ActiveTermCount: activeTermCount,
+		DiskSegments:    diskSegments,
+		TotalDiskDocs:   totalDiskDocs,
 		IndexedDocs:     m.indexedDocs.Load(),
 		Searches:        m.searches.Load(),
+		TotalTerms:      int(m.registry.GetTermCount()),
+		TotalDocs:       m.registry.GetTotalDocs(),
 	}
-
-	for _, seg := range m.segments {
-		stats.TotalDiskDocs += seg.DocCount()
-	}
-
-	stats.TotalTerms = int(m.registry.GetTermCount())
-	stats.TotalDocs = m.registry.GetTotalDocs()
-
-	return stats
 }
 
 // ManagerStats contains manager statistics.
@@ -1067,29 +1247,34 @@ func (m *Manager) Registry() TermRegistry {
 	return m.registry
 }
 
-// FSTRegistry returns the FST registry for advanced term operations.
-func (m *Manager) FSTRegistry() *CacheFSTRegistry {
-	return m.registry.(*CacheFSTRegistry)
+// PebbleRegistry returns the Pebble-backed term registry for advanced term operations.
+func (m *Manager) PebbleRegistry() *PebbleTermRegistry {
+	return m.registry.(*PebbleTermRegistry)
+}
+
+// FSTRegistry is an alias for PebbleRegistry kept for backward compatibility.
+func (m *Manager) FSTRegistry() *PebbleTermRegistry {
+	return m.PebbleRegistry()
 }
 
 // ListTerms returns all terms, optionally filtered by field.
 func (m *Manager) ListTerms(ctx context.Context, field string, limit, offset int) ([]TermEntry, int64, error) {
-	return m.FSTRegistry().ListTerms(ctx, field, limit, offset)
+	return m.PebbleRegistry().ListTerms(ctx, field, limit, offset)
 }
 
 // ListTermsByPrefix returns terms matching a prefix.
 func (m *Manager) ListTermsByPrefix(ctx context.Context, field, prefix string, limit int) ([]TermEntry, error) {
-	return m.FSTRegistry().ListTermsByPrefix(ctx, field, prefix, limit)
+	return m.PebbleRegistry().ListTermsByPrefix(ctx, field, prefix, limit)
 }
 
 // ListTermsByFuzzy returns terms within Levenshtein distance of the query.
 func (m *Manager) ListTermsByFuzzy(ctx context.Context, field, query string, maxDistance, limit int) ([]TermEntry, error) {
-	return m.FSTRegistry().ListTermsByFuzzy(ctx, field, query, maxDistance, limit)
+	return m.PebbleRegistry().ListTermsByFuzzy(ctx, field, query, maxDistance, limit)
 }
 
 // ListTermsByRegex returns terms matching a regex pattern.
 func (m *Manager) ListTermsByRegex(ctx context.Context, field, pattern string, limit int) ([]TermEntry, error) {
-	return m.FSTRegistry().ListTermsByRegex(ctx, field, pattern, limit)
+	return m.PebbleRegistry().ListTermsByRegex(ctx, field, pattern, limit)
 }
 
 // Load loads the manifest from disk.

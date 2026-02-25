@@ -395,9 +395,6 @@ func (p *Provider) RecordSearchQuery(ctx context.Context, indexID string) {
 }
 
 func normalizePath(path string) string {
-	// Normalize paths with IDs to reduce cardinality
-	// e.g., /indexes/abc123/documents -> /indexes/{id}/documents
-	// This is a simple implementation; can be enhanced
 	return path
 }
 

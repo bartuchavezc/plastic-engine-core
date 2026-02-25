@@ -159,7 +159,7 @@ func DefaultConfig() Config {
 		FlushThreshold:      5000,              // 5k docs before flush
 		FlushThresholdBytes: 16 * 1024 * 1024,   // 16MB estimated memory (keep MemSegment small on 2GB containers)
 		FlushInterval:       10 * time.Second,   // Check every 10s
-		MaxSegmentsPerLevel: 5,                  // Keep low for search performance
+		MaxSegmentsPerLevel: 5,                  // Merge when 5 segments accumulate at a level
 		LevelSizeMultiplier: 10,
 		MergeWorkers:        2,                  // 2 dedicated merge goroutines
 		MergeInterval:       30 * time.Second,   // Check every 30s

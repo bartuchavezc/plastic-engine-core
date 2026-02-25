@@ -7,8 +7,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -53,8 +51,7 @@ type createIndexRequest struct {
 	DefaultAnalyzer  string                   `json:"default_analyzer"`
 	DefaultTokenizer string                   `json:"default_tokenizer"`
 	MappingVersion   int                      `json:"mapping_version"`
-	Dynamic          string                   `json:"dynamic"`      // "true", "false", "strict"
-	RefreshTime      *string                  `json:"refresh_time"` // e.g., "1s", "500ms"
+	Dynamic          string                   `json:"dynamic"` // "true", "false", "strict"
 	FieldMappings    []createFieldMappingBody `json:"field_mappings"`
 	InitialShardKeys []string                 `json:"initial_shard_keys"`
 }
@@ -182,16 +179,6 @@ func (h *handler) handleCreateIndex(w http.ResponseWriter, r *http.Request) {
 		ShardConfig:      convertShardConfig(payload.ShardConfig),
 	}
 
-	// Parse refresh time if provided
-	if payload.RefreshTime != nil && *payload.RefreshTime != "" {
-		refreshTime, err := time.ParseDuration(*payload.RefreshTime)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("invalid refresh_time format: %v", err), http.StatusBadRequest)
-			return
-		}
-		req.RefreshTime = refreshTime
-	}
-
 	for _, fm := range payload.FieldMappings {
 		field := indexes.FieldMapping{
 			Name:      fm.Name,
@@ -306,7 +293,7 @@ func (h *handler) handleIngestDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.WriteHeader(http.StatusAccepted)
+	w.WriteHeader(http.StatusOK)
 }
 
 // bulkIngestResponse is the response for bulk ingest operations.
@@ -336,7 +323,7 @@ func (h *handler) handleBulkIngest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read the entire body as raw bytes for gjson parsing
-	body, err := io.ReadAll(io.LimitReader(r.Body, 100<<20)) // 100MB limit
+	body, err := io.ReadAll(io.LimitReader(r.Body, 512<<20)) // 512MB limit
 	if err != nil {
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		return
@@ -354,48 +341,34 @@ func (h *handler) handleBulkIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	docs := parsed.Array()
-	if len(docs) == 0 {
+	rawDocs := parsed.Array()
+	if len(rawDocs) == 0 {
 		clusterhttputil.WriteJSON(w, http.StatusOK, bulkIngestResponse{Indexed: 0})
 		return
 	}
 
-	// Process documents concurrently with bounded parallelism
-	var (
-		indexed   int64
-		failed    int64
-		errorsMu  sync.Mutex
-		errors    []bulkIngestError
-		wg        sync.WaitGroup
-		semaphore = make(chan struct{}, 32) // Max 32 concurrent ingests
-	)
+	// Parse all documents up front (CPU-only, no I/O).
+	batchDocs := make([]documents.BatchDocument, 0, len(rawDocs))
+	var parseErrors []bulkIngestError
 
-	for i, doc := range docs {
+	for i, doc := range rawDocs {
 		if !doc.IsObject() {
-			errorsMu.Lock()
-			errors = append(errors, bulkIngestError{
+			parseErrors = append(parseErrors, bulkIngestError{
 				Index: i,
 				Error: "document must be an object",
 			})
-			errorsMu.Unlock()
-			atomic.AddInt64(&failed, 1)
 			continue
 		}
 
-		// Extract document_id using gjson
 		docID := doc.Get("document_id").String()
 		if docID == "" {
-			errorsMu.Lock()
-			errors = append(errors, bulkIngestError{
+			parseErrors = append(parseErrors, bulkIngestError{
 				Index: i,
 				Error: "document_id is required",
 			})
-			errorsMu.Unlock()
-			atomic.AddInt64(&failed, 1)
 			continue
 		}
 
-		// Extract routing if present
 		var routing map[string]string
 		routingVal := doc.Get("routing")
 		if routingVal.Exists() && routingVal.IsObject() {
@@ -406,7 +379,6 @@ func (h *handler) handleBulkIngest(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 
-		// Get payload as raw JSON bytes
 		payloadVal := doc.Get("payload")
 		var payload json.RawMessage
 		if payloadVal.Exists() {
@@ -415,52 +387,37 @@ func (h *handler) handleBulkIngest(w http.ResponseWriter, r *http.Request) {
 			payload = json.RawMessage("{}")
 		}
 
-		wg.Add(1)
-		go func(idx int, documentID string, routing map[string]string, payload json.RawMessage) {
-			defer wg.Done()
-
-			semaphore <- struct{}{}        // Acquire
-			defer func() { <-semaphore }() // Release
-
-			ingestReq := documents.Request{
-				IndexID:    indexID,
-				DocumentID: documentID,
-				Routing:    routing,
-				Payload:    payload,
-			}
-
-			if err := h.coord.IngestDocument(ctx, ingestReq); err != nil {
-				errorsMu.Lock()
-				errors = append(errors, bulkIngestError{
-					Index:      idx,
-					DocumentID: documentID,
-					Error:      err.Error(),
-				})
-				errorsMu.Unlock()
-				atomic.AddInt64(&failed, 1)
-				return
-			}
-
-			atomic.AddInt64(&indexed, 1)
-		}(i, docID, routing, payload)
+		batchDocs = append(batchDocs, documents.BatchDocument{
+			IndexID:    indexID,
+			DocumentID: docID,
+			Routing:    routing,
+			Payload:    payload,
+		})
 	}
 
-	wg.Wait()
+	// Route and forward the entire batch to search nodes in one pass.
+	bulkErrors := h.coord.IngestBulk(ctx, indexID, batchDocs)
 
-	// Flush remaining batches (non-blocking). The batcher's flushSema
-	// limits concurrent HTTP requests to search nodes, preventing flooding
-	// without serializing the coordinator.
-	if batcher := h.coord.DocumentBatcher(); batcher != nil {
-		batcher.Flush()
+	// Merge parse errors and bulk errors into the response.
+	allErrors := parseErrors
+	for _, be := range bulkErrors {
+		allErrors = append(allErrors, bulkIngestError{
+			Index:      be.Index,
+			DocumentID: be.DocID,
+			Error:      be.Err.Error(),
+		})
 	}
 
-	response := bulkIngestResponse{
-		Indexed: int(indexed),
-		Failed:  int(failed),
-		Errors:  errors,
+	indexed := len(batchDocs) - len(bulkErrors)
+	if indexed < 0 {
+		indexed = 0
 	}
 
-	clusterhttputil.WriteJSON(w, http.StatusOK, response)
+	clusterhttputil.WriteJSON(w, http.StatusOK, bulkIngestResponse{
+		Indexed: indexed,
+		Failed:  len(parseErrors) + len(bulkErrors),
+		Errors:  allErrors,
+	})
 }
 
 func (h *handler) handleListIndexes(w http.ResponseWriter, r *http.Request) {
@@ -540,7 +497,6 @@ type indexResponse struct {
 	DefaultAnalyzer  string                 `json:"default_analyzer"`
 	DefaultTokenizer string                 `json:"default_tokenizer"`
 	MappingVersion   int                    `json:"mapping_version"`
-	RefreshTime      string                 `json:"refresh_time,omitempty"` // e.g., "1s", "500ms"
 	FieldMappings    []fieldMappingResponse `json:"field_mappings"`
 	CreatedAt        time.Time              `json:"created_at"`
 	UpdatedAt        time.Time              `json:"updated_at"`
@@ -583,11 +539,6 @@ type computedComponentResponse struct {
 }
 
 func toIndexResponse(def indexes.IndexDefinition) indexResponse {
-	refreshTimeStr := ""
-	if def.RefreshTime > 0 {
-		refreshTimeStr = def.RefreshTime.String()
-	}
-
 	resp := indexResponse{
 		ID:               def.ID,
 		Name:             def.Name,
@@ -597,7 +548,6 @@ func toIndexResponse(def indexes.IndexDefinition) indexResponse {
 		DefaultAnalyzer:  def.DefaultAnalyzer,
 		DefaultTokenizer: def.DefaultTokenizer,
 		MappingVersion:   def.MappingVersion,
-		RefreshTime:      refreshTimeStr,
 		CreatedAt:        def.CreatedAt,
 		UpdatedAt:        def.UpdatedAt,
 		FieldMappings:    make([]fieldMappingResponse, 0, len(def.FieldMappings)),

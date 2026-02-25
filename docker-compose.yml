@@ -33,49 +33,49 @@ services:
     depends_on:
       - jaeger
 
-  search-1:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: plastic-search-1
-    command: ["/app/search"]
-    ports:
-      - "9003:9090"   # API
-      - "9101:9091"   # Metrics
-    environment:
-      - ROLE=search
-      - PORT=9090
-      - JOIN_ADDR=http://coordinator:8080
-      - ADVERTISE_ADDR=http://search-1:9090
-      - DATA_DIR=/app/data
-      - ENABLE_PROMETHEUS=true
-      - METRICS_PORT=9091
-      - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
-      - OTEL_EXPORTER_OTLP_INSECURE=true
-      # Tell Go GC to collect aggressively before hitting the container limit.
-      # Without this, Go may use all 4GB before GC triggers → OOM kill with no log.
-      # Rule of thumb: 90-95% of container memory limit.
-      - GOMEMLIMIT=3800MiB
-    volumes:
-      - search-1-data:/app/data
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 4G
-        reservations:
-          cpus: '0.5'
-          memory: 512M
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-    networks:
-      - plastic-net
-    depends_on:
-      coordinator:
-        condition: service_healthy
+  # search-1:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: plastic-search-1
+  #   command: ["/app/search"]
+  #   ports:
+  #     - "9003:9090"   # API
+  #     - "9101:9091"   # Metrics
+  #   environment:
+  #     - ROLE=search
+  #     - PORT=9090
+  #     - JOIN_ADDR=http://coordinator:8080
+  #     - ADVERTISE_ADDR=http://search-1:9090
+  #     - DATA_DIR=/app/data
+  #     - ENABLE_PROMETHEUS=true
+  #     - METRICS_PORT=9091
+  #     - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
+  #     - OTEL_EXPORTER_OTLP_INSECURE=true
+  #     # Tell Go GC to collect aggressively before hitting the container limit.
+  #     # Without this, Go may use all 4GB before GC triggers → OOM kill with no log.
+  #     # Rule of thumb: 90-95% of container memory limit.
+  #     - GOMEMLIMIT=3800MiB
+  #   volumes:
+  #     - search-1-data:/app/data
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: '2'
+  #         memory: 4G
+  #       reservations:
+  #         cpus: '0.5'
+  #         memory: 512M
+  #   healthcheck:
+  #     test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 3
+  #   networks:
+  #     - plastic-net
+  #   depends_on:
+  #     coordinator:
+  #       condition: service_healthy
 
   search-2:
     build:
@@ -96,17 +96,17 @@ services:
       - METRICS_PORT=9092
       - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
       - OTEL_EXPORTER_OTLP_INSECURE=true
-      - GOMEMLIMIT=3800MiB
+      - GOMEMLIMIT=7600MiB
     volumes:
       - search-2-data:/app/data
     deploy:
       resources:
         limits:
-          cpus: '2'
-          memory: 4G
+          cpus: '4'
+          memory: 8G
         reservations:
-          cpus: '0.5'
-          memory: 512M
+          cpus: '1'
+          memory: 1024M
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
       interval: 10s
@@ -123,14 +123,16 @@ services:
   # =============================================================================
 
   jaeger:
-    image: jaegertracing/all-in-one:1.57
+    image: jaegertracing/jaeger:2.4.0
     container_name: plastic-jaeger
     ports:
       - "16686:16686"   # Jaeger UI
-      - "14268:14268"   # HTTP collector
       - "4317:4317"     # OTLP gRPC
-    environment:
-      - COLLECTOR_OTLP_ENABLED=true
+      - "4318:4318"     # OTLP HTTP
+      - "8889:8889"     # Spanmetrics Prometheus endpoint
+    volumes:
+      - ./deploy/jaeger/config.yaml:/etc/jaeger/config.yaml:ro
+    command: ["--config", "/etc/jaeger/config.yaml"]
     networks:
       - plastic-net
 
@@ -150,7 +152,7 @@ services:
       - plastic-net
     depends_on:
       - coordinator
-      - search-1
+#      - search-1
       - search-2
 
   grafana:
@@ -182,7 +184,7 @@ networks:
 
 volumes:
   coordinator-data:
-  search-1-data:
+  #search-1-data:
   search-2-data:
   prometheus-data:
   grafana-data:

@@ -20,81 +20,72 @@ import (
 	"github.com/blevesearch/vellum"
 )
 
-// CacheFSTRegistry is a term registry using an in-memory cache for fast writes,
-// a term WAL for durability, and FST for advanced lookups (prefix, fuzzy, regex).
+// CacheFSTRegistry manages the global term dictionary.
 //
 // Architecture:
-//   - Cache (map[string]uint64): All known terms in memory. GetOrCreate is a map lookup.
-//   - Term WAL (append-only file): Durability for new terms between FST rebuilds.
-//   - FST: Immutable read structure for prefix/fuzzy/regex searches.
+//   - Cache map: ALL terms, always. O(1) lookup for the hot path (GetOrCreate/Get).
+//     ~50 bytes per term × 1M terms = ~50MB. Loaded from FST at startup.
+//   - FST (on disk): compact snapshot of all terms as of the last background merge.
+//     NOT on the GetOrCreate/Get hot path. Used for: (a) startup warm-up, (b) advanced
+//     queries (fuzzy, regex, prefix range scans), (c) durable persistence across restarts.
+//   - Term WAL: durability for terms added after the last FST rebuild.
 //
-// Hot path (GetOrCreate): pure in-memory map lookup, zero disk I/O.
-// Background: periodically rebuild FST from cache, truncate WAL.
+// Hot path (GetOrCreate / Get):
+//   O(1) map lookup only. No FST involved. Critical at millions of calls/second.
+//
+// Background (doMerge):
+//   Rebuilds FST from the cache map when enough new terms accumulate or time passes.
+//   O(N log N) sort + O(N) FST build — runs at most every MinTimeBetweenMerges.
+//   Truncates WAL after FST swap (all terms now durable in FST).
 type CacheFSTRegistry struct {
-	// In-memory cache: "field\x00term" -> termID counter (uint64).
-	// Bounded by vocabulary size (~10-30MB for 100K-300K terms).
+	// cache holds ALL terms: both those in the FST and those added since the last merge.
+	// Always the source of truth for GetOrCreate and Get.
 	cache   map[string]uint64
 	cacheMu sync.RWMutex
 
-	// Read layer for advanced lookups (prefix, fuzzy, regex)
-	fst   *vellum.FST
-	fstMu sync.RWMutex // Only for atomic FST swap
+	// fstTermCount is the len(cache) at the last successful doMerge().
+	// Used by shouldMerge() to detect new terms without iterating the cache.
+	fstTermCount atomic.Int64
 
-	// Term WAL for durability of new terms between FST rebuilds
+	// FST: compact term dictionary for persistence and advanced queries (fuzzy/regex/prefix).
+	// NOT used on the GetOrCreate/Get hot path.
+	fst   *vellum.FST
+	fstMu sync.RWMutex
+
+	// Term WAL for durability of delta terms between FST rebuilds.
 	walFile   *os.File
 	walWriter *bufio.Writer
 	walMu     sync.Mutex
 	walPath   string
 
-	// Document frequency: fully in-memory
+	// Document frequency: global DF needed for BM25 scoring and document updates.
 	dfCache   map[string]int64
 	dfCacheMu sync.RWMutex
 
-	// Global stats (atomic for lock-free access)
 	totalDocs atomic.Int64
 
-	// Term ID counter
 	termIDCounter atomic.Uint64
 
-	// Merge control (cache -> FST rebuild)
 	merging       atomic.Bool
-	lastMergeTime atomic.Int64 // Unix timestamp
+	lastMergeTime atomic.Int64
 	mergeConfig   MergeConfig
 
-	// Paths
 	dataDir  string
 	fstPath  string
 	metaPath string
 
-	// Background worker
 	closeCh chan struct{}
 	wg      sync.WaitGroup
 }
 
-// MergeConfig configures when the cache is consolidated into FST.
 type MergeConfig struct {
-	// MaxCacheSizeMB triggers FST rebuild when estimated cache size exceeds this.
-	// Default: 64MB
-	MaxCacheSizeMB int
-
-	// MaxNewTermCount triggers FST rebuild when new terms (not in FST) exceed this.
-	// Default: 100,000
-	MaxNewTermCount int
-
-	// MaxTimeSinceLastMerge triggers FST rebuild after this duration.
-	// Default: 10 minutes
+	MaxCacheSizeMB        int
+	MaxNewTermCount       int
 	MaxTimeSinceLastMerge time.Duration
-
-	// MinTimeBetweenMerges prevents rebuilds too close together.
-	// Default: 30 seconds
-	MinTimeBetweenMerges time.Duration
-
-	// MergeCheckInterval is how often to check rebuild triggers.
-	// Default: 5 seconds
-	MergeCheckInterval time.Duration
+	MinTimeBetweenMerges  time.Duration
+	MergeCheckInterval    time.Duration
 }
 
-// DefaultMergeConfig returns sensible defaults for production use.
 func DefaultMergeConfig() MergeConfig {
 	return MergeConfig{
 		MaxCacheSizeMB:        64,
@@ -105,18 +96,15 @@ func DefaultMergeConfig() MergeConfig {
 	}
 }
 
-// CacheFSTConfig configures the registry.
 type CacheFSTConfig struct {
 	DataDir     string
 	MergeConfig MergeConfig
 }
 
-// formatTermID converts a uint64 counter to a term ID string.
 func formatTermID(counter uint64) string {
 	return "t" + strconv.FormatUint(counter, 10)
 }
 
-// parseTermID extracts the counter from a term ID string.
 func parseTermID(termID string) uint64 {
 	if len(termID) < 2 || termID[0] != 't' {
 		return 0
@@ -125,12 +113,10 @@ func parseTermID(termID string) uint64 {
 	return counter
 }
 
-// cacheKey builds the map key for field+term.
 func cacheKey(field, term string) string {
 	return field + "\x00" + term
 }
 
-// parseCacheKey extracts field and term from a cache key.
 func parseCacheKey(key string) (field, term string) {
 	for i := 0; i < len(key); i++ {
 		if key[i] == 0 {
@@ -140,11 +126,8 @@ func parseCacheKey(key string) (field, term string) {
 	return key, ""
 }
 
-// Term WAL binary format per entry:
-// entryLen(4) + crc32(4) + fieldLen(2) + field + termLen(2) + term + counter(8)
 const termWALHeaderSize = 4 + 4
 
-// NewCacheFSTRegistry creates a new term registry.
 func NewCacheFSTRegistry(config CacheFSTConfig) (*CacheFSTRegistry, error) {
 	if config.MergeConfig.MaxCacheSizeMB == 0 {
 		config.MergeConfig = DefaultMergeConfig()
@@ -159,7 +142,7 @@ func NewCacheFSTRegistry(config CacheFSTConfig) (*CacheFSTRegistry, error) {
 	metaPath := filepath.Join(config.DataDir, "meta.bin")
 
 	r := &CacheFSTRegistry{
-		cache:       make(map[string]uint64, 100_000),
+		cache:       make(map[string]uint64, 1024),
 		dfCache:     make(map[string]int64, 100_000),
 		dataDir:     config.DataDir,
 		fstPath:     fstPath,
@@ -169,21 +152,18 @@ func NewCacheFSTRegistry(config CacheFSTConfig) (*CacheFSTRegistry, error) {
 		closeCh:     make(chan struct{}),
 	}
 
-	// Load metadata (counter, totalDocs)
 	r.loadMeta()
 
-	// Load existing FST and populate cache
-	if err := r.loadFST(); err != nil {
-		// FST doesn't exist yet, that's OK for fresh start
+	// Load FST and warm the cache map from it — O(1) lookup for all historical terms.
+	if err := r.loadFST(); err == nil {
+		r.warmCacheFromFST()
 	}
-	r.warmCacheFromFST()
 
-	// Replay term WAL to recover terms added since last FST build
+	// Replay WAL to restore terms added after the last FST build.
 	if err := r.replayTermWAL(); err != nil {
-		// WAL doesn't exist yet or is empty, OK for fresh start
+		// WAL missing or empty, fine for fresh start.
 	}
 
-	// Open term WAL for append
 	walFile, err := os.OpenFile(walPath, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("open term wal: %w", err)
@@ -191,38 +171,12 @@ func NewCacheFSTRegistry(config CacheFSTConfig) (*CacheFSTRegistry, error) {
 	r.walFile = walFile
 	r.walWriter = bufio.NewWriterSize(walFile, 64*1024)
 
-	// Start background worker
 	r.wg.Add(1)
 	go r.mergeWorker()
 
 	return r, nil
 }
 
-// warmCacheFromFST loads all terms from FST into the in-memory cache.
-func (r *CacheFSTRegistry) warmCacheFromFST() {
-	r.fstMu.RLock()
-	fst := r.fst
-	r.fstMu.RUnlock()
-
-	if fst == nil {
-		return
-	}
-
-	iter, err := fst.Iterator(nil, nil)
-	if err != nil {
-		return
-	}
-
-	r.cacheMu.Lock()
-	for err == nil {
-		key, val := iter.Current()
-		r.cache[string(key)] = val
-		err = iter.Next()
-	}
-	r.cacheMu.Unlock()
-}
-
-// replayTermWAL reads the term WAL and adds entries to the cache.
 func (r *CacheFSTRegistry) replayTermWAL() error {
 	data, err := os.ReadFile(r.walPath)
 	if err != nil {
@@ -244,15 +198,14 @@ func (r *CacheFSTRegistry) replayTermWAL() error {
 		pos += termWALHeaderSize
 
 		if pos+int(entryLen) > len(data) {
-			break // truncated entry
+			break
 		}
 
 		entryData := data[pos : pos+int(entryLen)]
 		if crc32.ChecksumIEEE(entryData) != storedCRC {
-			break // corrupted entry
+			break
 		}
 
-		// Parse: fieldLen(2) + field + termLen(2) + term + counter(8)
 		ep := 0
 		if ep+2 > len(entryData) {
 			break
@@ -290,7 +243,6 @@ func (r *CacheFSTRegistry) replayTermWAL() error {
 		pos += int(entryLen)
 	}
 
-	// Ensure counter is at least as high as any replayed term
 	if current := r.termIDCounter.Load(); maxCounter > current {
 		r.termIDCounter.Store(maxCounter)
 	}
@@ -298,7 +250,6 @@ func (r *CacheFSTRegistry) replayTermWAL() error {
 	return nil
 }
 
-// appendTermWAL writes a new term to the WAL for durability.
 func (r *CacheFSTRegistry) appendTermWAL(field, term string, counter uint64) {
 	entryLen := 2 + len(field) + 2 + len(term) + 8
 	entry := make([]byte, entryLen)
@@ -325,21 +276,45 @@ func (r *CacheFSTRegistry) appendTermWAL(field, term string, counter uint64) {
 	r.walMu.Unlock()
 }
 
-// flushTermWAL flushes the WAL buffer to disk.
 func (r *CacheFSTRegistry) flushTermWAL() {
 	r.walMu.Lock()
 	r.walWriter.Flush()
 	r.walMu.Unlock()
 }
 
-// Get retrieves a term ID if it exists.
+// warmCacheFromFST populates the cache map from the FST at startup.
+// After this call, all historical terms are O(1) accessible via the cache.
+func (r *CacheFSTRegistry) warmCacheFromFST() {
+	r.fstMu.RLock()
+	fst := r.fst
+	r.fstMu.RUnlock()
+	if fst == nil {
+		return
+	}
+
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+
+	iter, err := fst.Iterator(nil, nil)
+	count := int64(0)
+	for err == nil {
+		key, val := iter.Current()
+		r.cache[string(key)] = val
+		if val > r.termIDCounter.Load() {
+			r.termIDCounter.Store(val)
+		}
+		count++
+		err = iter.Next()
+	}
+	r.fstTermCount.Store(count)
+}
+
+// Get retrieves a term ID if it exists. O(1) map lookup.
 func (r *CacheFSTRegistry) Get(ctx context.Context, field, term string) (string, bool) {
 	key := cacheKey(field, term)
-
 	r.cacheMu.RLock()
 	counter, ok := r.cache[key]
 	r.cacheMu.RUnlock()
-
 	if ok {
 		return formatTermID(counter), true
 	}
@@ -347,32 +322,30 @@ func (r *CacheFSTRegistry) Get(ctx context.Context, field, term string) (string,
 }
 
 // GetOrCreate retrieves an existing term or creates a new one.
-// Hot path: pure in-memory map lookup, zero disk I/O for existing terms.
+//
+// Fast path (existing terms): O(1) map lookup.
+// Slow path (new terms): write lock, WAL append.
 func (r *CacheFSTRegistry) GetOrCreate(ctx context.Context, field, term string) (string, error) {
 	key := cacheKey(field, term)
 
-	// Fast path: RLock read from cache
+	// Fast path: O(1) map lookup — covers all terms (historical + recent).
 	r.cacheMu.RLock()
 	counter, ok := r.cache[key]
 	r.cacheMu.RUnlock()
-
 	if ok {
 		return formatTermID(counter), nil
 	}
 
-	// Slow path: create new term
+	// Slow path: new term — acquire write lock and re-check.
 	r.cacheMu.Lock()
-	// Double-check (another goroutine might have created it)
 	if counter, ok := r.cache[key]; ok {
 		r.cacheMu.Unlock()
 		return formatTermID(counter), nil
 	}
-
 	counter = r.termIDCounter.Add(1)
 	r.cache[key] = counter
 	r.cacheMu.Unlock()
 
-	// Append to WAL for durability (buffered, not sync)
 	r.appendTermWAL(field, term, counter)
 
 	return formatTermID(counter), nil
@@ -382,6 +355,22 @@ func (r *CacheFSTRegistry) GetOrCreate(ctx context.Context, field, term string) 
 func (r *CacheFSTRegistry) CreateAlias(field, newTerm, existingTermID string) error {
 	key := cacheKey(field, newTerm)
 	counter := parseTermID(existingTermID)
+
+	r.cacheMu.RLock()
+	_, ok := r.cache[key]
+	r.cacheMu.RUnlock()
+	if ok {
+		return nil
+	}
+
+	r.fstMu.RLock()
+	fst := r.fst
+	r.fstMu.RUnlock()
+	if fst != nil {
+		if _, exists, err := fst.Get([]byte(key)); err == nil && exists {
+			return nil
+		}
+	}
 
 	r.cacheMu.Lock()
 	if _, ok := r.cache[key]; ok {
@@ -395,7 +384,6 @@ func (r *CacheFSTRegistry) CreateAlias(field, newTerm, existingTermID string) er
 	return nil
 }
 
-// GetDF returns the document frequency for a term.
 func (r *CacheFSTRegistry) GetDF(termID string) int64 {
 	r.dfCacheMu.RLock()
 	df := r.dfCache[termID]
@@ -403,24 +391,20 @@ func (r *CacheFSTRegistry) GetDF(termID string) int64 {
 	return df
 }
 
-// IncrementDF atomically increments the document frequency.
 func (r *CacheFSTRegistry) IncrementDF(termID string, delta int64) {
 	r.dfCacheMu.Lock()
 	r.dfCache[termID] += delta
 	r.dfCacheMu.Unlock()
 }
 
-// GetTotalDocs returns the total indexed documents.
 func (r *CacheFSTRegistry) GetTotalDocs() int64 {
 	return r.totalDocs.Load()
 }
 
-// IncrementTotalDocs increments the total document count.
 func (r *CacheFSTRegistry) IncrementTotalDocs(delta int64) {
 	r.totalDocs.Add(delta)
 }
 
-// GetTermsWithPrefix returns term IDs matching a prefix.
 func (r *CacheFSTRegistry) GetTermsWithPrefix(ctx context.Context, field, prefix string) []string {
 	entries, _ := r.ListTermsByPrefix(ctx, field, prefix, 0)
 	termIDs := make([]string, len(entries))
@@ -430,38 +414,30 @@ func (r *CacheFSTRegistry) GetTermsWithPrefix(ctx context.Context, field, prefix
 	return termIDs
 }
 
-// GetTermCount returns the total number of terms.
 func (r *CacheFSTRegistry) GetTermCount() int64 {
 	r.cacheMu.RLock()
-	count := int64(len(r.cache))
+	n := int64(len(r.cache))
 	r.cacheMu.RUnlock()
-	return count
+	return n
 }
 
-// Sync flushes the term WAL to disk.
 func (r *CacheFSTRegistry) Sync() error {
 	r.flushTermWAL()
 	return nil
 }
 
-// Close closes the registry.
 func (r *CacheFSTRegistry) Close() error {
 	close(r.closeCh)
 	r.wg.Wait()
 
-	// Final FST rebuild
 	r.doMerge()
-
-	// Save metadata
 	r.saveMeta()
 
-	// Flush and close WAL
 	r.walMu.Lock()
 	r.walWriter.Flush()
 	r.walFile.Close()
 	r.walMu.Unlock()
 
-	// Close FST
 	r.fstMu.Lock()
 	if r.fst != nil {
 		r.fst.Close()
@@ -471,10 +447,11 @@ func (r *CacheFSTRegistry) Close() error {
 	return nil
 }
 
-// ListTerms returns all terms, optionally filtered by field.
+// ListTerms returns all terms from the cache (always complete).
 func (r *CacheFSTRegistry) ListTerms(ctx context.Context, field string, limit, offset int) ([]TermEntry, int64, error) {
+	var entries []TermEntry
+
 	r.cacheMu.RLock()
-	entries := make([]TermEntry, 0, len(r.cache))
 	for key, counter := range r.cache {
 		f, t := parseCacheKey(key)
 		if field == "" || f == field {
@@ -510,51 +487,13 @@ func (r *CacheFSTRegistry) ListTerms(ctx context.Context, field string, limit, o
 	return entries, total, nil
 }
 
-// ListTermsByPrefix returns terms matching a prefix.
-// Uses FST for efficient prefix iteration when available, falls back to cache scan.
+// ListTermsByPrefix returns terms matching a prefix from the cache.
 func (r *CacheFSTRegistry) ListTermsByPrefix(ctx context.Context, field, prefix string, limit int) ([]TermEntry, error) {
 	var entries []TermEntry
 	searchKey := field + "\x00" + prefix
 
-	// Try FST first (efficient ordered prefix iteration)
-	r.fstMu.RLock()
-	fst := r.fst
-	r.fstMu.RUnlock()
-
-	seen := make(map[string]bool)
-
-	if fst != nil {
-		iter, err := fst.Iterator([]byte(searchKey), nil)
-		if err == nil {
-			for err == nil {
-				key, val := iter.Current()
-				if !bytes.HasPrefix(key, []byte(searchKey)) {
-					break
-				}
-				f, t := parseCacheKey(string(key))
-				termID := formatTermID(val)
-				entryKey := string(key)
-				seen[entryKey] = true
-				entries = append(entries, TermEntry{
-					Field:  f,
-					Term:   t,
-					TermID: termID,
-					DF:     r.GetDF(termID),
-				})
-				if limit > 0 && len(entries) >= limit {
-					break
-				}
-				err = iter.Next()
-			}
-		}
-	}
-
-	// Also scan cache for terms not yet in FST
 	r.cacheMu.RLock()
 	for key, counter := range r.cache {
-		if seen[key] {
-			continue
-		}
 		if !bytes.HasPrefix([]byte(key), []byte(searchKey)) {
 			continue
 		}
@@ -583,7 +522,7 @@ func (r *CacheFSTRegistry) ListTermsByPrefix(ctx context.Context, field, prefix 
 	return entries, nil
 }
 
-// ListTermsByFuzzy returns terms within Levenshtein distance.
+// ListTermsByFuzzy returns terms within Levenshtein distance, scanning the cache.
 func (r *CacheFSTRegistry) ListTermsByFuzzy(ctx context.Context, field, query string, maxDistance int, limit int) ([]TermEntry, error) {
 	if maxDistance < 1 {
 		maxDistance = 1
@@ -626,7 +565,7 @@ func (r *CacheFSTRegistry) ListTermsByFuzzy(ctx context.Context, field, query st
 	return entries, nil
 }
 
-// ListTermsByRegex returns terms matching a regex pattern.
+// ListTermsByRegex returns terms matching a regex pattern, scanning the cache.
 func (r *CacheFSTRegistry) ListTermsByRegex(ctx context.Context, field, pattern string, limit int) ([]TermEntry, error) {
 	re, err := regexp.Compile(pattern)
 	if err != nil {
@@ -667,7 +606,6 @@ func (r *CacheFSTRegistry) ListTermsByRegex(ctx context.Context, field, pattern 
 	return entries, nil
 }
 
-// loadFST loads the FST from disk.
 func (r *CacheFSTRegistry) loadFST() error {
 	fst, err := vellum.Open(r.fstPath)
 	if err != nil {
@@ -679,7 +617,6 @@ func (r *CacheFSTRegistry) loadFST() error {
 	return nil
 }
 
-// loadMeta loads metadata from the meta file.
 func (r *CacheFSTRegistry) loadMeta() {
 	data, err := os.ReadFile(r.metaPath)
 	if err != nil || len(data) < 16 {
@@ -689,7 +626,6 @@ func (r *CacheFSTRegistry) loadMeta() {
 	r.totalDocs.Store(int64(binary.BigEndian.Uint64(data[8:16])))
 }
 
-// saveMeta saves metadata to a file.
 func (r *CacheFSTRegistry) saveMeta() {
 	buf := make([]byte, 16)
 	binary.BigEndian.PutUint64(buf[0:8], r.termIDCounter.Load())
@@ -697,7 +633,6 @@ func (r *CacheFSTRegistry) saveMeta() {
 	os.WriteFile(r.metaPath, buf, 0644)
 }
 
-// mergeWorker runs the background FST rebuild job.
 func (r *CacheFSTRegistry) mergeWorker() {
 	defer r.wg.Done()
 
@@ -722,7 +657,6 @@ func (r *CacheFSTRegistry) mergeWorker() {
 	}
 }
 
-// shouldMerge checks if FST rebuild triggers are met.
 func (r *CacheFSTRegistry) shouldMerge() bool {
 	if r.merging.Load() {
 		return false
@@ -739,27 +673,17 @@ func (r *CacheFSTRegistry) shouldMerge() bool {
 		return true
 	}
 
-	// Check if cache has significantly more terms than FST
-	r.fstMu.RLock()
-	var fstCount int
-	if r.fst != nil {
-		fstCount = int(r.fst.Len())
-	}
-	r.fstMu.RUnlock()
-
+	// Trigger if enough new terms have been added since the last FST rebuild.
 	r.cacheMu.RLock()
-	cacheCount := len(r.cache)
+	currentTerms := int64(len(r.cache))
 	r.cacheMu.RUnlock()
 
-	newTerms := cacheCount - fstCount
-	if newTerms >= r.mergeConfig.MaxNewTermCount {
-		return true
-	}
-
-	return false
+	return currentTerms-r.fstTermCount.Load() >= int64(r.mergeConfig.MaxNewTermCount)
 }
 
-// doMerge rebuilds the FST from the in-memory cache.
+// doMerge rebuilds the FST from the full cache map (all terms), then truncates the WAL.
+// The cache map is never modified — it remains the O(1) hot path.
+// After the FST swap, fstTermCount is updated for shouldMerge() tracking.
 func (r *CacheFSTRegistry) doMerge() {
 	if !r.merging.CompareAndSwap(false, true) {
 		return
@@ -767,26 +691,24 @@ func (r *CacheFSTRegistry) doMerge() {
 	defer r.merging.Store(false)
 	r.lastMergeTime.Store(time.Now().Unix())
 
-	// Snapshot the cache under read lock
+	// Snapshot the full cache under a read lock.
 	r.cacheMu.RLock()
-	keyVals := make(map[string]uint64, len(r.cache))
+	snapshot := make(map[string]uint64, len(r.cache))
 	for k, v := range r.cache {
-		keyVals[k] = v
+		snapshot[k] = v
 	}
 	r.cacheMu.RUnlock()
 
-	if len(keyVals) == 0 {
+	if len(snapshot) == 0 {
 		return
 	}
 
-	// Sort keys for FST builder
-	sortedKeys := make([]string, 0, len(keyVals))
-	for k := range keyVals {
+	sortedKeys := make([]string, 0, len(snapshot))
+	for k := range snapshot {
 		sortedKeys = append(sortedKeys, k)
 	}
 	sort.Strings(sortedKeys)
 
-	// Build new FST
 	tempPath := r.fstPath + ".tmp"
 	f, err := os.Create(tempPath)
 	if err != nil {
@@ -801,7 +723,7 @@ func (r *CacheFSTRegistry) doMerge() {
 	}
 
 	for _, key := range sortedKeys {
-		if err := builder.Insert([]byte(key), keyVals[key]); err != nil {
+		if err := builder.Insert([]byte(key), snapshot[key]); err != nil {
 			builder.Close()
 			f.Close()
 			os.Remove(tempPath)
@@ -822,19 +744,23 @@ func (r *CacheFSTRegistry) doMerge() {
 		return
 	}
 
-	// Atomic swap
+	// Atomic FST swap.
 	r.fstMu.Lock()
-	oldFST := r.fst
+	oldFSTToClose := r.fst
 	r.fst = newFST
 	r.fstMu.Unlock()
 
 	os.Rename(tempPath, r.fstPath)
 
-	if oldFST != nil {
-		oldFST.Close()
+	if oldFSTToClose != nil {
+		oldFSTToClose.Close()
 	}
 
-	// Truncate WAL (all terms are now in FST)
+	// Update term count so shouldMerge() knows how many terms are in the FST.
+	r.fstTermCount.Store(int64(len(snapshot)))
+
+	// Truncate WAL — all terms in the snapshot are now durably in the FST file.
+	// Terms added to the cache after the snapshot was taken will re-appear in the WAL.
 	r.walMu.Lock()
 	r.walWriter.Flush()
 	r.walFile.Truncate(0)
@@ -845,29 +771,22 @@ func (r *CacheFSTRegistry) doMerge() {
 	r.saveMeta()
 }
 
-// Stats returns registry statistics.
 func (r *CacheFSTRegistry) Stats() RegistryStats {
-	r.fstMu.RLock()
-	var fstCount int64
-	if r.fst != nil {
-		fstCount = int64(r.fst.Len())
-	}
-	r.fstMu.RUnlock()
-
 	r.cacheMu.RLock()
-	cacheCount := int64(len(r.cache))
+	total := int64(len(r.cache))
 	r.cacheMu.RUnlock()
+
+	fstCount := r.fstTermCount.Load()
 
 	return RegistryStats{
 		FSTTermCount:   fstCount,
-		NewTermCount:   cacheCount - fstCount,
-		TotalTermCount: cacheCount,
+		NewTermCount:   total - fstCount,
+		TotalTermCount: total,
 		TotalDocs:      r.totalDocs.Load(),
 		IsMerging:      r.merging.Load(),
 	}
 }
 
-// RegistryStats contains registry statistics.
 type RegistryStats struct {
 	FSTTermCount   int64 `json:"fst_term_count"`
 	NewTermCount   int64 `json:"new_term_count"`
@@ -876,10 +795,8 @@ type RegistryStats struct {
 	IsMerging      bool  `json:"is_merging"`
 }
 
-// parseFSTKey extracts field and term from FST key format (same as cache key).
 func parseFSTKey(key string) (field, term string) {
 	return parseCacheKey(key)
 }
 
-// Compile-time check
 var _ TermRegistry = (*CacheFSTRegistry)(nil)

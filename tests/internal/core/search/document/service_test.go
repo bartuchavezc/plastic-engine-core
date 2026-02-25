@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	indexes "plastic-engine-core/internal/core/cluster/indexes"
 	"plastic-engine-core/internal/core/search/document"
@@ -29,13 +28,7 @@ func TestServiceIndexPersistsDocument(t *testing.T) {
 		t.Fatalf("Index: %v", err)
 	}
 
-	// Wait for document to be indexed (async worker)
-	requireEventually(t, 500*time.Millisecond, func() bool {
-		hits, err := segMgr.Search(context.Background(), "title", "hello")
-		return err == nil && len(hits) > 0
-	})
-
-	// Verify we can search for the term
+	// Document must be immediately searchable (synchronous indexing).
 	hits, err := segMgr.Search(context.Background(), "title", "hello")
 	if err != nil {
 		t.Fatalf("Search: %v", err)
@@ -121,8 +114,7 @@ func newTestService(t *testing.T) (*document.Service, *segment.Manager) {
 	}
 
 	cfg := document.ShardWorkerConfig{
-		MaxWorkers:    1,
-		QueueCapacity: 16,
+		MaxWorkers: 1,
 	}
 
 	service := document.NewService(manager, provider, planner, writerFactory, cfg, logger.DefaultLogger())

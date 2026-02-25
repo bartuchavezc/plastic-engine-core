@@ -155,7 +155,6 @@ type CreateIndexPayload struct {
 	DefaultTokenizer string          `json:"default_tokenizer"`
 	MappingVersion   int             `json:"mapping_version"`
 	FieldMappings    json.RawMessage `json:"field_mappings,omitempty"`
-	RefreshTime      time.Duration   `json:"refresh_time,omitempty"`
 	CreatedAt        time.Time       `json:"created_at"`
 }
 

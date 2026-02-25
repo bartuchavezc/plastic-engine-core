@@ -36,3 +36,9 @@ scrape_configs:
         labels:
           service: 'search'
           instance: 'search-2'
+
+  # Jaeger spanmetrics (for Jaeger Monitor / SPM tab)
+  - job_name: 'jaeger-spanmetrics'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['jaeger:8889']

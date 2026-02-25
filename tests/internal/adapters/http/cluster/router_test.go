@@ -139,7 +139,7 @@ func TestIngestDocumentRoutesToPrimaryShard(t *testing.T) {
 		} else {
 			forwardedBody = body
 		}
-		w.WriteHeader(http.StatusAccepted)
+		w.WriteHeader(http.StatusOK)
 		select {
 		case forwardedCh <- struct{}{}:
 		default:
@@ -222,14 +222,14 @@ func TestIngestDocumentRoutesToPrimaryShard(t *testing.T) {
 
 	router.ServeHTTP(ingestRec, ingestReq)
 
-	if ingestRec.Code != http.StatusAccepted {
-		t.Fatalf("ingest status = %d, want %d", ingestRec.Code, http.StatusAccepted)
+	if ingestRec.Code != http.StatusOK {
+		t.Fatalf("ingest status = %d, want %d", ingestRec.Code, http.StatusOK)
 	}
 
-	// Wait for the batcher to flush (max 100ms)
+	// Batcher is synchronous — document was forwarded before handler returned.
 	select {
 	case <-forwardedCh:
-	case <-time.After(100 * time.Millisecond):
+	default:
 	}
 
 	if len(forwardedBody) == 0 {

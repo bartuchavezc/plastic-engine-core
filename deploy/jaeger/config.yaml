@@ -1,0 +1,56 @@
+# Jaeger v2 configuration with SPM (Service Performance Monitoring)
+# Uses the spanmetrics connector to generate RED metrics from traces,
+# then exposes them via Prometheus endpoint for Jaeger Monitor tab.
+
+extensions:
+  jaeger_storage:
+    backends:
+      memstore:
+        memory: {}
+    metric_backends:
+      prom_store:
+        prometheus:
+          endpoint: http://prometheus:9090
+          normalize_calls: true
+          normalize_duration: true
+
+  jaeger_query:
+    storage:
+      traces: memstore
+      metrics: prom_store
+    ui:
+      config_file: ""
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: "0.0.0.0:4317"
+      http:
+        endpoint: "0.0.0.0:4318"
+
+connectors:
+  spanmetrics:
+    namespace: span_metrics
+    metrics_flush_interval: 5s
+    dimensions:
+      - name: shard.id
+      - name: batch.size
+
+exporters:
+  jaeger_storage_exporter:
+    trace_storage: memstore
+
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: ""
+
+service:
+  extensions: [jaeger_storage, jaeger_query]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [spanmetrics, jaeger_storage_exporter]
+    metrics/spanmetrics:
+      receivers: [spanmetrics]
+      exporters: [prometheus]

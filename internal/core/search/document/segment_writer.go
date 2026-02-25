@@ -7,6 +7,9 @@ import (
 
 	"plastic-engine-core/internal/core/search/segment"
 	"plastic-engine-core/internal/pkg/logger"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // termIndexPool reuses map[string]int across prepareDocumentBatch calls.
@@ -92,9 +95,12 @@ func (w *SegmentIndexWriter) Index(ctx context.Context, req DocumentWriteRequest
 }
 
 // indexBatchChunkSize is the max docs per IndexDocumentBatch call.
-// Prevents memory explosion when the worker accumulates large batches (e.g. 21K docs).
-// Each chunk's intermediate allocations are released before the next chunk starts.
-const indexBatchChunkSize = 512
+// Larger chunks reduce per-chunk overhead (lock acquisitions, WAL batch writes,
+// term cache lookups) at the cost of higher peak memory per chunk.
+// With 285MB flush budget per shard, 2048 docs × ~50KB each ≈ 100MB peak — well within budget.
+const indexBatchChunkSize = 2048
+
+var writerTracer = otel.Tracer("search/segment-writer")
 
 // IndexBatch indexes multiple documents using the optimized batch path.
 // Large batches are automatically chunked to bound memory usage.
@@ -102,10 +108,6 @@ func (w *SegmentIndexWriter) IndexBatch(ctx context.Context, requests []Document
 	if len(requests) == 0 {
 		return nil
 	}
-
-	w.log.Debug("IndexBatch: starting",
-		logger.Field{Key: "requests_count", Value: len(requests)},
-	)
 
 	// Process in chunks to bound memory
 	indexed := 0
@@ -116,7 +118,11 @@ func (w *SegmentIndexWriter) IndexBatch(ctx context.Context, requests []Document
 		}
 		chunk := requests[start:end]
 
+		_, prepSpan := writerTracer.Start(ctx, "batch.prepare")
+		prepSpan.SetAttributes(attribute.Int("chunk.size", len(chunk)))
 		docs := w.prepareDocumentBatch(chunk)
+		prepSpan.End()
+
 		if len(docs) == 0 {
 			continue
 		}
@@ -131,7 +137,7 @@ func (w *SegmentIndexWriter) IndexBatch(ctx context.Context, requests []Document
 		indexed += len(docs)
 	}
 
-	w.log.Info("IndexBatch: completed successfully",
+	w.log.Debug("IndexBatch: completed",
 		logger.Field{Key: "documents_count", Value: indexed},
 	)
 

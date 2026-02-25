@@ -62,7 +62,8 @@ func NewService(shards *shards.Manager, assignments *AssignmentProvider, planner
 	}
 }
 
-// Index validates and enqueues the command for asynchronous processing.
+// Index validates and synchronously indexes a single document.
+// Blocks until the document is indexed or an error occurs.
 func (s *Service) Index(ctx context.Context, cmd Command) error {
 	if err := validateCommand(cmd); err != nil {
 		return err
@@ -72,9 +73,6 @@ func (s *Service) Index(ctx context.Context, cmd Command) error {
 		cmd.ReceivedAt = time.Now().UTC()
 	}
 
-	// Early validation: resolve assignment and build plans before enqueuing.
-	// This ensures configuration errors (e.g., unsupported tokenizer) are caught
-	// immediately and returned to the client, rather than failing silently in the worker.
 	if err := s.validateIndexConfig(ctx, cmd.ShardID); err != nil {
 		s.log.Error("index configuration validation failed",
 			logger.Field{Key: "shard_id", Value: cmd.ShardID},
@@ -94,16 +92,12 @@ func (s *Service) Index(ctx context.Context, cmd Command) error {
 		return err
 	}
 
-	if err := worker.Submit(ctx, WorkItem{Command: cmd}); err != nil {
-		s.log.Error("failed to submit to worker queue",
-			logger.Field{Key: "shard_id", Value: cmd.ShardID},
-			logger.Field{Key: "document_id", Value: cmd.DocumentID},
-			logger.Field{Key: "error", Value: err},
-		)
-		return err
+	errs := worker.Process(ctx, []Command{cmd})
+	if len(errs) > 0 && errs[0] != nil {
+		return errs[0]
 	}
 
-	s.log.Debug("document submitted to worker queue",
+	s.log.Debug("document indexed",
 		logger.Field{Key: "shard_id", Value: cmd.ShardID},
 		logger.Field{Key: "document_id", Value: cmd.DocumentID},
 	)
@@ -111,16 +105,79 @@ func (s *Service) Index(ctx context.Context, cmd Command) error {
 	return nil
 }
 
+// IndexBulk synchronously indexes a batch of commands, potentially from multiple shards.
+// Returns per-document errors (nil = success). Blocks until all documents are processed.
+func (s *Service) IndexBulk(ctx context.Context, cmds []Command) []error {
+	if len(cmds) == 0 {
+		return nil
+	}
+
+	errs := make([]error, len(cmds))
+
+	// Group commands by shard.
+	type shardGroup struct {
+		indices []int
+		cmds    []Command
+	}
+	groups := make(map[string]*shardGroup)
+
+	for i := range cmds {
+		cmd := &cmds[i]
+		if err := validateCommand(*cmd); err != nil {
+			errs[i] = err
+			continue
+		}
+		if cmd.ReceivedAt.IsZero() {
+			cmd.ReceivedAt = time.Now().UTC()
+		}
+		g := groups[cmd.ShardID]
+		if g == nil {
+			g = &shardGroup{}
+			groups[cmd.ShardID] = g
+		}
+		g.indices = append(g.indices, i)
+		g.cmds = append(g.cmds, *cmd)
+	}
+
+	// Process shards in parallel — each shard's worker.Process is independent.
+	// Previously shards were processed sequentially, serializing work that
+	// could overlap (tokenization on shard A while shard B flushes to segment).
+	var wg sync.WaitGroup
+	var mu sync.Mutex // protects errs slice
+	for shardID, group := range groups {
+		worker, err := s.ensureWorker(shardID)
+		if err != nil {
+			for _, idx := range group.indices {
+				errs[idx] = err
+			}
+			continue
+		}
+
+		wg.Add(1)
+		go func(w *ShardWorker, g *shardGroup) {
+			defer wg.Done()
+			shardErrs := w.Process(ctx, g.cmds)
+			mu.Lock()
+			for j, shardErr := range shardErrs {
+				if shardErr != nil {
+					errs[g.indices[j]] = shardErr
+				}
+			}
+			mu.Unlock()
+		}(worker, group)
+	}
+	wg.Wait()
+
+	return errs
+}
+
 // validateIndexConfig validates that the index configuration is valid for indexing.
-// This catches configuration errors early, before enqueuing the document.
 func (s *Service) validateIndexConfig(ctx context.Context, shardID string) error {
-	// Resolve assignment to get index definition
 	_, indexDef, err := s.assignments.AssignmentForShard(ctx, shardID)
 	if err != nil {
 		return fmt.Errorf("failed to resolve assignment: %w", err)
 	}
 
-	// Build field plans to validate tokenizers/analyzers
 	_, err = s.planner.BuildPlans(indexDef)
 	if err != nil {
 		return fmt.Errorf("failed to build field plans: %w", err)
@@ -171,7 +228,6 @@ func (s *Service) ensureWorker(shardID string) (*ShardWorker, error) {
 
 	shard, ok := s.shards.GetShard(shardID)
 	if !ok {
-		// TODO dynamic shard creation: trigger coordinator to materialise missing shard and retry.
 		return nil, ErrShardNotLoaded
 	}
 

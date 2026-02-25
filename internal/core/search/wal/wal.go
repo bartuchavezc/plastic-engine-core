@@ -207,32 +207,58 @@ func (w *WAL) AppendDocument(op DocIndexOp) (uint64, error) {
 
 // AppendDocuments appends multiple documents under a single lock acquisition.
 // Much faster than calling AppendDocument N times for batches.
+// Pre-encodes all documents outside the lock to minimize lock hold time.
 func (w *WAL) AppendDocuments(ops []DocIndexOp) (uint64, error) {
+	// Pre-encode all documents outside the lock.
+	frames := make([][]byte, len(ops))
+	now := uint64(time.Now().UnixNano())
+	for i, op := range ops {
+		frames[i] = encodeFrame(OpIndexDoc, now, encodeDocIndexOp(op))
+	}
+	return w.writeFrames(frames)
+}
+
+// AppendPreEncodedDocuments writes pre-encoded document payloads to the WAL.
+// The caller provides raw encoded payloads (from EncodeDocIndexOp); framing
+// (header, checksum) is added here. This avoids building intermediate DocIndexOp
+// structs when the caller can encode directly.
+func (w *WAL) AppendPreEncodedDocuments(encodedDocs [][]byte) (uint64, error) {
+	now := uint64(time.Now().UnixNano())
+	frames := make([][]byte, len(encodedDocs))
+	for i, data := range encodedDocs {
+		frames[i] = encodeFrame(OpIndexDoc, now, data)
+	}
+	return w.writeFrames(frames)
+}
+
+// encodeFrame wraps a payload in the WAL entry format: type(1) + timestamp(8) + dataLen(4) + data.
+func encodeFrame(opType OpType, tsNano uint64, data []byte) []byte {
+	headerSize := 1 + 8 + 4
+	buf := make([]byte, headerSize+len(data))
+	buf[0] = byte(opType)
+	binary.BigEndian.PutUint64(buf[1:9], tsNano)
+	binary.BigEndian.PutUint32(buf[9:13], uint32(len(data)))
+	copy(buf[13:], data)
+	return buf
+}
+
+// writeFrames writes pre-encoded frames under a single lock acquisition.
+func (w *WAL) writeFrames(frames [][]byte) (uint64, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	var seq uint64
-	for _, op := range ops {
-		data := encodeDocIndexOp(op)
+	var frameBuf [8]byte
+	for _, buf := range frames {
 		w.sequence++
-		seq = w.sequence
-
-		headerSize := 1 + 8 + 4
-		totalSize := headerSize + len(data)
-
-		buf := make([]byte, totalSize)
-		buf[0] = byte(OpIndexDoc)
-		binary.BigEndian.PutUint64(buf[1:9], uint64(time.Now().UnixNano()))
-		binary.BigEndian.PutUint32(buf[9:13], uint32(len(data)))
-		copy(buf[13:], data)
-
 		length := uint32(len(buf))
 		checksum := crc32.ChecksumIEEE(buf)
-
-		binary.Write(w.writer, binary.BigEndian, length)
-		binary.Write(w.writer, binary.BigEndian, checksum)
+		binary.BigEndian.PutUint32(frameBuf[0:4], length)
+		binary.BigEndian.PutUint32(frameBuf[4:8], checksum)
+		w.writer.Write(frameBuf[:])
 		w.writer.Write(buf)
 	}
+
+	seq := w.sequence
 
 	if w.syncMode == SyncEvery {
 		if err := w.syncLocked(); err != nil {
@@ -241,6 +267,12 @@ func (w *WAL) AppendDocuments(ops []DocIndexOp) (uint64, error) {
 	}
 
 	return seq, nil
+}
+
+// EncodeDocIndexOp encodes a DocIndexOp to bytes. Exported for callers that
+// want to pre-encode documents and use AppendPreEncodedDocuments.
+func EncodeDocIndexOp(op DocIndexOp) []byte {
+	return encodeDocIndexOp(op)
 }
 
 func encodeDocIndexOp(op DocIndexOp) []byte {
@@ -404,10 +436,23 @@ func (w *WAL) AppendCheckpoint(op CheckpointOp) (uint64, error) {
 }
 
 // Sync flushes and syncs the WAL to disk.
+// Phase 1 flushes the bufio.Writer to OS page cache under lock (microseconds).
+// Phase 2 fsyncs to physical disk WITHOUT holding the lock, so new writes
+// can proceed concurrently. Data written after Phase 1 will be synced next cycle.
 func (w *WAL) Sync() error {
+	// Phase 1: flush buffer → OS page cache (under lock, fast)
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.syncLocked()
+	err := w.writer.Flush()
+	w.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("flush writer: %w", err)
+	}
+
+	// Phase 2: fsync to physical disk (no lock, 10-100ms)
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("sync file: %w", err)
+	}
+	return nil
 }
 
 func (w *WAL) syncLocked() error {

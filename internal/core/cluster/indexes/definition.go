@@ -137,7 +137,6 @@ type IndexDefinition struct {
 	FieldMappings    []FieldMapping
 	MappingVersion   int
 	NgramConfig      NgramConfig
-	RefreshTime      time.Duration // Time to wait before flushing batched documents
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }
@@ -154,7 +153,6 @@ type CreateIndexRequest struct {
 	FieldMappings    []FieldMapping
 	MappingVersion   int
 	NgramConfig      *NgramConfig // nil means use default
-	RefreshTime      time.Duration // Time to wait before flushing batched documents (0 = immediate)
 	InitialShardKeys []string
 }
 

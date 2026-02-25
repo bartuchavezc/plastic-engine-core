@@ -209,14 +209,6 @@ func (c *Coordinator) MappingsService() *mappings.Service {
 	return c.mappingsSvc
 }
 
-// DocumentBatcher returns the document batcher for bulk operations.
-func (c *Coordinator) DocumentBatcher() *documents.DocumentBatcher {
-	if c == nil || c.documentsRouter == nil {
-		return nil
-	}
-	return c.documentsRouter.Batcher
-}
-
 // GetMapping retrieves the mapping for an index.
 func (c *Coordinator) GetMapping(ctx context.Context, indexID string) (mappings.Mapping, error) {
 	if c == nil || c.mappingsSvc == nil {
@@ -275,7 +267,6 @@ func (c *Coordinator) CreateIndex(ctx context.Context, req indexes.CreateIndexRe
 		DefaultTokenizer: req.DefaultTokenizer,
 		MappingVersion:   req.MappingVersion,
 		FieldMappings:    fieldMappingsJSON,
-		RefreshTime:      req.RefreshTime,
 		CreatedAt:        time.Now().UTC(),
 	}
 
@@ -414,6 +405,20 @@ func (c *Coordinator) IngestDocument(ctx context.Context, req documents.Request)
 		return errors.New("coordinator not initialised")
 	}
 	return c.documentsRouter.Handle(ctx, req)
+}
+
+// IngestBulk routes a batch of documents to the appropriate search nodes in bulk.
+// All documents must belong to the same index. Returns per-document errors.
+func (c *Coordinator) IngestBulk(ctx context.Context, indexID string, docs []documents.BatchDocument) []documents.BulkError {
+	if c == nil || c.documentsRouter == nil {
+		err := errors.New("coordinator not initialised")
+		out := make([]documents.BulkError, len(docs))
+		for i := range docs {
+			out[i] = documents.BulkError{Index: i, Err: err}
+		}
+		return out
+	}
+	return c.documentsRouter.HandleBulk(ctx, indexID, docs)
 }
 
 // ListNodes returns all nodes registered in the cluster.
@@ -602,7 +607,6 @@ func (c *Coordinator) enrichAssignments(ctx context.Context, assignments []searc
 			assignment.Fields = append([]indexes.FieldMapping(nil), def.FieldMappings...)
 		}
 		assignment.ShardStrategy = def.ShardStrategy
-		assignment.RefreshInterval = def.RefreshTime
 	}
 
 	return assignments, nil
