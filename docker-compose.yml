@@ -33,49 +33,46 @@ services:
     depends_on:
       - jaeger
 
-  # search-1:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile
-  #   container_name: plastic-search-1
-  #   command: ["/app/search"]
-  #   ports:
-  #     - "9003:9090"   # API
-  #     - "9101:9091"   # Metrics
-  #   environment:
-  #     - ROLE=search
-  #     - PORT=9090
-  #     - JOIN_ADDR=http://coordinator:8080
-  #     - ADVERTISE_ADDR=http://search-1:9090
-  #     - DATA_DIR=/app/data
-  #     - ENABLE_PROMETHEUS=true
-  #     - METRICS_PORT=9091
-  #     - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
-  #     - OTEL_EXPORTER_OTLP_INSECURE=true
-  #     # Tell Go GC to collect aggressively before hitting the container limit.
-  #     # Without this, Go may use all 4GB before GC triggers → OOM kill with no log.
-  #     # Rule of thumb: 90-95% of container memory limit.
-  #     - GOMEMLIMIT=3800MiB
-  #   volumes:
-  #     - search-1-data:/app/data
-  #   deploy:
-  #     resources:
-  #       limits:
-  #         cpus: '2'
-  #         memory: 4G
-  #       reservations:
-  #         cpus: '0.5'
-  #         memory: 512M
-  #   healthcheck:
-  #     test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 3
-  #   networks:
-  #     - plastic-net
-  #   depends_on:
-  #     coordinator:
-  #       condition: service_healthy
+  search-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: plastic-search-1
+    command: ["/app/search"]
+    ports:
+      - "9003:9090"   # API
+      - "9101:9091"   # Metrics
+    environment:
+      - ROLE=search
+      - PORT=9090
+      - JOIN_ADDR=http://coordinator:8080
+      - ADVERTISE_ADDR=http://search-1:9090
+      - DATA_DIR=/app/data
+      - ENABLE_PROMETHEUS=true
+      - METRICS_PORT=9091
+      - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
+      - OTEL_EXPORTER_OTLP_INSECURE=true
+      - GOMEMLIMIT=3800MiB
+    volumes:
+      - search-1-data:/app/data
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - plastic-net
+    depends_on:
+      coordinator:
+        condition: service_healthy
 
   search-2:
     build:
@@ -96,17 +93,17 @@ services:
       - METRICS_PORT=9092
       - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
       - OTEL_EXPORTER_OTLP_INSECURE=true
-      - GOMEMLIMIT=7600MiB
+      - GOMEMLIMIT=3800MiB
     volumes:
       - search-2-data:/app/data
     deploy:
       resources:
         limits:
-          cpus: '4'
-          memory: 8G
+          cpus: '2'
+          memory: 4G
         reservations:
-          cpus: '1'
-          memory: 1024M
+          cpus: '0.5'
+          memory: 512M
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
       interval: 10s
@@ -152,7 +149,7 @@ services:
       - plastic-net
     depends_on:
       - coordinator
-#      - search-1
+      - search-1
       - search-2
 
   grafana:
@@ -184,7 +181,7 @@ networks:
 
 volumes:
   coordinator-data:
-  #search-1-data:
+  search-1-data:
   search-2-data:
   prometheus-data:
   grafana-data:

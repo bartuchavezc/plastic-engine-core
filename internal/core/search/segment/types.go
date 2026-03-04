@@ -135,6 +135,10 @@ type Config struct {
 	// Default: 30s.
 	MergeInterval time.Duration
 
+	// IOConcurrency limits concurrent flush + merge I/O operations.
+	// Default: 2 (at least one flush and one merge can run concurrently).
+	IOConcurrency int
+
 	// DataDir is the directory for segment files.
 	DataDir string
 

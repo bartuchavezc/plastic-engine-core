@@ -15,7 +15,7 @@ type SegmentManager interface {
 	SearchByTermID(termID string) ([]segment.Hit, error)
 	GetDF(termID string) int64
 	GetTotalDocs() int64
-	Registry() segment.TermRegistry
+	GetTermsWithPrefix(ctx context.Context, field, prefix string) []string
 }
 
 // SegmentExecutor executes queries against a segment-based shard.
@@ -97,12 +97,8 @@ func (e *SegmentExecutor) executeTerm(ctx context.Context, q TermQuery, scoringC
 		return nil, nil
 	}
 
-	// Get term ID for scoring
-	registry := e.segmentMgr.Registry()
-	termID, found := registry.Get(ctx, q.Field, termValue)
-	if !found {
-		return nil, nil
-	}
+	// Deterministic term key — no registry lookup needed.
+	termID := q.Field + "\x00" + termValue
 
 	// Update scoring context with DF
 	df := e.segmentMgr.GetDF(termID)
@@ -119,7 +115,6 @@ func (e *SegmentExecutor) executeMatch(ctx context.Context, q MatchQuery, scorin
 		return nil, nil
 	}
 
-	registry := e.segmentMgr.Registry()
 	docScores := make(map[string]float64)
 
 	for _, token := range tokens {
@@ -132,11 +127,8 @@ func (e *SegmentExecutor) executeMatch(ctx context.Context, q MatchQuery, scorin
 			continue
 		}
 
-		// Get term ID for scoring
-		termID, found := registry.Get(ctx, q.Field, token)
-		if !found {
-			continue
-		}
+		// Deterministic term key — no registry lookup needed.
+		termID := q.Field + "\x00" + token
 
 		// Update scoring context with DF
 		df := e.segmentMgr.GetDF(termID)
@@ -167,10 +159,8 @@ func (e *SegmentExecutor) executeMatch(ctx context.Context, q MatchQuery, scorin
 }
 
 func (e *SegmentExecutor) executePrefix(ctx context.Context, q PrefixQuery, scoringCtx ScoringContext) ([]Hit, error) {
-	registry := e.segmentMgr.Registry()
-
-	// Get all term IDs that match the prefix
-	termIDs := registry.GetTermsWithPrefix(ctx, q.Field, q.Value)
+	// Get all term IDs that match the prefix by scanning segments directly.
+	termIDs := e.segmentMgr.GetTermsWithPrefix(ctx, q.Field, q.Value)
 	if len(termIDs) == 0 {
 		return nil, nil
 	}

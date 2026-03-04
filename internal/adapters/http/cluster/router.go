@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	clusterindex "plastic-engine-core/internal/adapters/http/cluster/index"
+	clusterknowledge "plastic-engine-core/internal/adapters/http/cluster/knowledge"
 	clustermanagement "plastic-engine-core/internal/adapters/http/cluster/management"
 	clustersearchhttp "plastic-engine-core/internal/adapters/http/cluster/search"
 	"plastic-engine-core/internal/core/cluster"
@@ -35,6 +36,7 @@ func NewRouter(coord *cluster.Coordinator, joinService *nodes.JoinService) http.
 		handleHeartbeat(w, req, joinService)
 	})
 	clustersearchhttp.Mount(r, coord, httpClient)
+	clusterknowledge.Mount(r, coord, httpClient)
 	r.Mount("/debug", middleware.Profiler())
 
 	return r

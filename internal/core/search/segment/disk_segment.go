@@ -137,18 +137,16 @@ func (s *DiskSegment) loadMeta() error {
 // loadDict loads the bloom filter + termDict from disk.
 // Called eagerly by OpenDiskSegment or lazily via ensureDictLoaded.
 func (s *DiskSegment) loadDict() error {
-	// Seek to the position right after metadata (header is 24 bytes).
-	dictStart := int64(24 + s.header.MetaSize)
-	if _, err := s.file.Seek(dictStart, io.SeekStart); err != nil {
-		return fmt.Errorf("seek to bloom/dict: %w", err)
-	}
+	// Position right after metadata (header is 24 bytes).
+	offset := int64(24 + s.header.MetaSize)
 
 	// Read bloom filter (version 2+)
 	if s.header.Version >= 2 && s.header.BloomSize > 0 {
 		bloomData := make([]byte, s.header.BloomSize)
-		if _, err := io.ReadFull(s.file, bloomData); err != nil {
+		if _, err := s.file.ReadAt(bloomData, offset); err != nil {
 			return fmt.Errorf("read bloom filter: %w", err)
 		}
+		offset += int64(s.header.BloomSize)
 		bloom, err := ReadBloomFilter(bytes.NewReader(bloomData))
 		if err != nil {
 			return fmt.Errorf("parse bloom filter: %w", err)
@@ -158,7 +156,7 @@ func (s *DiskSegment) loadDict() error {
 
 	// Read term dictionary (binary format)
 	dictData := make([]byte, s.header.DictSize)
-	if _, err := io.ReadFull(s.file, dictData); err != nil {
+	if _, err := s.file.ReadAt(dictData, offset); err != nil {
 		return fmt.Errorf("read dict: %w", err)
 	}
 
@@ -217,19 +215,21 @@ func (s *DiskSegment) Search(termID string) []Hit {
 		return nil
 	}
 
+	// Lock only for in-memory structures (bloom filter + termDict).
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	// Fast path: check bloom filter first (avoids dict lookup if term definitely not present)
 	if s.bloom != nil && !s.bloom.MayContain(termID) {
+		s.mu.RUnlock()
 		return nil // Definitely not in this segment
 	}
 
 	entry, found := s.findTerm(termID)
+	s.mu.RUnlock() // Release before disk I/O — pread is thread-safe.
+
 	if !found {
 		return nil
 	}
 
+	// Disk I/O without lock (pread does not use file offset).
 	postings, err := s.readPostings(entry.PostingOffset, entry.PostingCount)
 	if err != nil {
 		return nil
@@ -249,21 +249,20 @@ func (s *DiskSegment) Search(termID string) []Hit {
 	return hits
 }
 
-// readPostings reads posting list from the file.
+// readPostings reads posting list from the file using pread (ReadAt).
+// pread is atomic and does not modify the file offset, so multiple goroutines
+// can read from the same file descriptor concurrently without a lock.
 func (s *DiskSegment) readPostings(offset int64, count int) ([]Posting, error) {
-	if _, err := s.file.Seek(offset, io.SeekStart); err != nil {
+	// Read data length (4 bytes) via pread — no seek, no lock needed.
+	var lenBuf [4]byte
+	if _, err := s.file.ReadAt(lenBuf[:], offset); err != nil {
 		return nil, err
 	}
+	dataLen := binary.BigEndian.Uint32(lenBuf[:])
 
-	// Read posting data length
-	var dataLen uint32
-	if err := binary.Read(s.file, binary.BigEndian, &dataLen); err != nil {
-		return nil, err
-	}
-
-	// Read posting data
+	// Read posting data via pread.
 	data := make([]byte, dataLen)
-	if _, err := io.ReadFull(s.file, data); err != nil {
+	if _, err := s.file.ReadAt(data, offset+4); err != nil {
 		return nil, err
 	}
 
@@ -366,51 +365,42 @@ func encodeTermDictBinary(entries []TermDictEntry) []byte {
 }
 
 // decodeTermDictBinary decodes the term dictionary from binary format.
+// Uses direct slice indexing (~3x faster than binary.Read which uses reflection).
 func decodeTermDictBinary(data []byte) ([]TermDictEntry, error) {
 	if len(data) < 4 {
 		return nil, fmt.Errorf("dict data too short")
 	}
 
-	buf := bytes.NewReader(data)
-
-	var count uint32
-	if err := binary.Read(buf, binary.BigEndian, &count); err != nil {
-		return nil, err
-	}
-
+	count := int(binary.BigEndian.Uint32(data[:4]))
 	entries := make([]TermDictEntry, 0, count)
+	off := 4
 
-	for i := uint32(0); i < count; i++ {
-		var termIDLen uint16
-		if err := binary.Read(buf, binary.BigEndian, &termIDLen); err != nil {
-			return nil, err
+	for i := 0; i < count; i++ {
+		if off+2 > len(data) {
+			return nil, fmt.Errorf("truncated at entry %d: termID length", i)
 		}
+		termIDLen := int(binary.BigEndian.Uint16(data[off:]))
+		off += 2
 
-		termID := make([]byte, termIDLen)
-		if _, err := io.ReadFull(buf, termID); err != nil {
-			return nil, err
+		if off+termIDLen > len(data) {
+			return nil, fmt.Errorf("truncated at entry %d: termID", i)
 		}
+		termID := string(data[off : off+termIDLen])
+		off += termIDLen
 
-		var offset uint64
-		if err := binary.Read(buf, binary.BigEndian, &offset); err != nil {
-			return nil, err
+		if off+20 > len(data) {
+			return nil, fmt.Errorf("truncated at entry %d: fields", i)
 		}
-
-		var df uint64
-		if err := binary.Read(buf, binary.BigEndian, &df); err != nil {
-			return nil, err
-		}
-
-		var postingCount uint32
-		if err := binary.Read(buf, binary.BigEndian, &postingCount); err != nil {
-			return nil, err
-		}
+		offset := int64(binary.BigEndian.Uint64(data[off:]))
+		df := int64(binary.BigEndian.Uint64(data[off+8:]))
+		postingCount := int(binary.BigEndian.Uint32(data[off+16:]))
+		off += 20
 
 		entries = append(entries, TermDictEntry{
-			TermID:       string(termID),
-			PostingOffset: int64(offset),
-			DF:           int64(df),
-			PostingCount: int(postingCount),
+			TermID:        termID,
+			PostingOffset: offset,
+			DF:            df,
+			PostingCount:  postingCount,
 		})
 	}
 
@@ -435,6 +425,32 @@ func (s *DiskSegment) GetLocalDF(termID string) int64 {
 		return entry.DF
 	}
 	return 0
+}
+
+// GetTermsWithPrefix returns all termIDs that start with the given prefix.
+// Uses binary search to find the start position, then scans forward.
+func (s *DiskSegment) GetTermsWithPrefix(prefix string) []string {
+	if err := s.ensureDictLoaded(); err != nil {
+		return nil
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Binary search for first entry >= prefix
+	start := sort.Search(len(s.termDict), func(i int) bool {
+		return s.termDict[i].TermID >= prefix
+	})
+
+	var result []string
+	for i := start; i < len(s.termDict); i++ {
+		tid := s.termDict[i].TermID
+		if len(tid) < len(prefix) || tid[:len(prefix)] != prefix {
+			break
+		}
+		result = append(result, tid)
+	}
+	return result
 }
 
 // DocCount returns the number of documents in this segment.

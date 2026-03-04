@@ -6,8 +6,11 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"plastic-engine-core/internal/core/search/document"
+	"plastic-engine-core/internal/core/search/knowledge"
 	searchquery "plastic-engine-core/internal/core/search/query"
 	"plastic-engine-core/internal/core/search/segment"
 	"plastic-engine-core/internal/core/search/shards"
@@ -43,13 +46,22 @@ type TermLookup interface {
 	ListTermsByRegex(ctx context.Context, shardID, field, pattern string, limit int) ([]segment.TermEntry, error)
 }
 
+// KnowledgeStore manages named knowledge graphs (Type B indices).
+type KnowledgeStore interface {
+	GetOrCreate(name string) (*knowledge.AdjacencyMatrix, error)
+	Get(name string) (*knowledge.AdjacencyMatrix, bool)
+	Delete(name string) error
+	List() []string
+}
+
 // RouterConfig holds configuration for creating a Router.
 type RouterConfig struct {
-	Indexer     Indexer
-	Searcher    Searcher
-	ShardSyncer ShardSyncer
-	TermLookup  TermLookup
-	Logger      logger.Logger
+	Indexer        Indexer
+	Searcher       Searcher
+	ShardSyncer    ShardSyncer
+	TermLookup     TermLookup
+	KnowledgeStore KnowledgeStore
+	Logger         logger.Logger
 }
 
 // NewRouter exposes the HTTP surface of a search node.
@@ -99,6 +111,26 @@ func NewRouterWithConfig(cfg RouterConfig) http.Handler {
 	// Term lookup APIs
 	mux.HandleFunc("/terms", func(w http.ResponseWriter, r *http.Request) {
 		handleTermLookup(w, r, cfg.TermLookup, log)
+	})
+
+	// Knowledge graph APIs (Type B)
+	mux.HandleFunc("/knowledge/graphs", func(w http.ResponseWriter, r *http.Request) {
+		handleKnowledgeGraphs(w, r, cfg.KnowledgeStore, log)
+	})
+	mux.HandleFunc("/knowledge/edges", func(w http.ResponseWriter, r *http.Request) {
+		handleKnowledgeEdges(w, r, cfg.KnowledgeStore, log)
+	})
+	mux.HandleFunc("/knowledge/spread", func(w http.ResponseWriter, r *http.Request) {
+		handleKnowledgeSpread(w, r, cfg.KnowledgeStore, log)
+	})
+	mux.HandleFunc("/knowledge/decay", func(w http.ResponseWriter, r *http.Request) {
+		handleKnowledgeDecay(w, r, cfg.KnowledgeStore, log)
+	})
+	mux.HandleFunc("/knowledge/nodes", func(w http.ResponseWriter, r *http.Request) {
+		handleKnowledgeNodes(w, r, cfg.KnowledgeStore, log)
+	})
+	mux.HandleFunc("/knowledge/stats", func(w http.ResponseWriter, r *http.Request) {
+		handleKnowledgeStats(w, r, cfg.KnowledgeStore, log)
 	})
 
 	return mux
@@ -547,4 +579,391 @@ func handleTermLookup(w http.ResponseWriter, r *http.Request, lookup TermLookup,
 		http.Error(w, "encoding failed", http.StatusInternalServerError)
 		return
 	}
+}
+
+// --- Knowledge graph handlers (Type B) ---
+
+// handleKnowledgeGraphs handles CRUD for knowledge graphs.
+// POST: create graph (query: name)
+// DELETE: delete graph (query: name)
+// GET: list all graphs
+func handleKnowledgeGraphs(w http.ResponseWriter, r *http.Request, store KnowledgeStore, log logger.Logger) {
+	if store == nil {
+		http.Error(w, "knowledge store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		names := store.List()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"graphs": names,
+		})
+
+	case http.MethodPost:
+		name := r.URL.Query().Get("name")
+		if strings.TrimSpace(name) == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		if _, err := store.GetOrCreate(name); err != nil {
+			http.Error(w, "failed to create graph: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]string{
+			"name":   name,
+			"status": "created",
+		})
+
+	case http.MethodDelete:
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		if err := store.Delete(name); err != nil {
+			http.Error(w, "failed to delete graph: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleKnowledgeEdges handles edge operations.
+// POST: add edge (query: graph; body: {node_a, node_b, weight, type, source})
+// GET: get edges (query: graph, node, direction, min_weight)
+// DELETE: delete edge (query: graph, node_a, node_b)
+func handleKnowledgeEdges(w http.ResponseWriter, r *http.Request, store KnowledgeStore, log logger.Logger) {
+	if store == nil {
+		http.Error(w, "knowledge store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	query := r.URL.Query()
+	graphName := query.Get("graph")
+	if graphName == "" {
+		http.Error(w, "graph is required", http.StatusBadRequest)
+		return
+	}
+
+	graph, ok := store.Get(graphName)
+	if !ok {
+		http.Error(w, "graph not found", http.StatusNotFound)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPost:
+		defer r.Body.Close()
+		var req struct {
+			NodeA    string  `json:"node_a"`
+			NodeB    string  `json:"node_b"`
+			Weight   float64 `json:"weight"`
+			EdgeType string  `json:"type,omitempty"`
+			Source   string  `json:"source,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if req.NodeA == "" || req.NodeB == "" {
+			http.Error(w, "node_a and node_b are required", http.StatusBadRequest)
+			return
+		}
+		if req.Weight <= 0 {
+			req.Weight = 1.0
+		}
+		err := graph.AddEdge(req.NodeA, req.NodeB, knowledge.EdgeData{
+			Weight:    req.Weight,
+			EdgeType:  req.EdgeType,
+			CreatedAt: time.Now().Unix(),
+			Source:    req.Source,
+		})
+		if err != nil {
+			http.Error(w, "failed to add edge: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+
+	case http.MethodGet:
+		node := query.Get("node")
+		if node == "" {
+			http.Error(w, "node is required", http.StatusBadRequest)
+			return
+		}
+		minWeight := 0.0
+		if mw := query.Get("min_weight"); mw != "" {
+			if v, err := strconv.ParseFloat(mw, 64); err == nil {
+				minWeight = v
+			}
+		}
+		direction := query.Get("direction")
+		var edges []knowledge.Edge
+		switch direction {
+		case "in":
+			edges = graph.GetIncomingEdges(node, minWeight)
+		case "both":
+			edges = append(graph.GetEdges(node, minWeight), graph.GetIncomingEdges(node, minWeight)...)
+		default:
+			edges = graph.GetEdges(node, minWeight)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"node":  node,
+			"edges": edges,
+			"count": len(edges),
+		})
+
+	case http.MethodDelete:
+		nodeA := query.Get("node_a")
+		nodeB := query.Get("node_b")
+		if nodeA == "" || nodeB == "" {
+			http.Error(w, "node_a and node_b are required", http.StatusBadRequest)
+			return
+		}
+		if err := graph.DeleteEdge(nodeA, nodeB); err != nil {
+			http.Error(w, "failed to delete edge: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleKnowledgeSpread handles graph traversal.
+// GET: spread from node (query: graph, node, hops, decay)
+func handleKnowledgeSpread(w http.ResponseWriter, r *http.Request, store KnowledgeStore, log logger.Logger) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if store == nil {
+		http.Error(w, "knowledge store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	query := r.URL.Query()
+	graphName := query.Get("graph")
+	if graphName == "" {
+		http.Error(w, "graph is required", http.StatusBadRequest)
+		return
+	}
+
+	graph, ok := store.Get(graphName)
+	if !ok {
+		http.Error(w, "graph not found", http.StatusNotFound)
+		return
+	}
+
+	node := query.Get("node")
+	if node == "" {
+		http.Error(w, "node is required", http.StatusBadRequest)
+		return
+	}
+
+	hops := 2
+	if h := query.Get("hops"); h != "" {
+		if v, err := strconv.Atoi(h); err == nil && v > 0 && v <= 10 {
+			hops = v
+		}
+	}
+
+	decay := 0.7
+	if d := query.Get("decay"); d != "" {
+		if v, err := strconv.ParseFloat(d, 64); err == nil && v > 0 && v <= 1 {
+			decay = v
+		}
+	}
+
+	result := graph.Spread(node, hops, decay)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"node":   node,
+		"hops":   hops,
+		"decay":  decay,
+		"spread": result,
+	})
+}
+
+// handleKnowledgeDecay handles edge weight decay.
+// POST: decay edges (query: graph; body: {factor})
+func handleKnowledgeDecay(w http.ResponseWriter, r *http.Request, store KnowledgeStore, log logger.Logger) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if store == nil {
+		http.Error(w, "knowledge store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	query := r.URL.Query()
+	graphName := query.Get("graph")
+	if graphName == "" {
+		http.Error(w, "graph is required", http.StatusBadRequest)
+		return
+	}
+
+	graph, ok := store.Get(graphName)
+	if !ok {
+		http.Error(w, "graph not found", http.StatusNotFound)
+		return
+	}
+
+	defer r.Body.Close()
+	var req struct {
+		Factor float64 `json:"factor"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Factor <= 0 || req.Factor >= 1 {
+		http.Error(w, "factor must be between 0 and 1 (exclusive)", http.StatusBadRequest)
+		return
+	}
+
+	if err := graph.DecayEdges(req.Factor); err != nil {
+		http.Error(w, "failed to decay edges: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleKnowledgeNodes handles node metadata operations.
+// PUT: set node (query: graph, node_id; body: {label, type, metadata})
+// GET: get node or list nodes (query: graph, node_id or prefix, limit)
+// DELETE: delete node (query: graph, node_id)
+func handleKnowledgeNodes(w http.ResponseWriter, r *http.Request, store KnowledgeStore, log logger.Logger) {
+	if store == nil {
+		http.Error(w, "knowledge store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	query := r.URL.Query()
+	graphName := query.Get("graph")
+	if graphName == "" {
+		http.Error(w, "graph is required", http.StatusBadRequest)
+		return
+	}
+
+	graph, ok := store.Get(graphName)
+	if !ok {
+		http.Error(w, "graph not found", http.StatusNotFound)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPut:
+		nodeID := query.Get("node_id")
+		if nodeID == "" {
+			http.Error(w, "node_id is required", http.StatusBadRequest)
+			return
+		}
+		defer r.Body.Close()
+		var req struct {
+			Label    string            `json:"label,omitempty"`
+			Type     string            `json:"type,omitempty"`
+			Metadata map[string]string `json:"metadata,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		err := graph.SetNode(nodeID, knowledge.NodeData{
+			Label:    req.Label,
+			Type:     req.Type,
+			Metadata: req.Metadata,
+		})
+		if err != nil {
+			http.Error(w, "failed to set node: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+
+	case http.MethodGet:
+		nodeID := query.Get("node_id")
+		if nodeID != "" {
+			data, found := graph.GetNode(nodeID)
+			if !found {
+				http.Error(w, "node not found", http.StatusNotFound)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"node_id":  nodeID,
+				"label":    data.Label,
+				"type":     data.Type,
+				"metadata": data.Metadata,
+			})
+		} else {
+			prefix := query.Get("prefix")
+			limit := 100
+			if l := query.Get("limit"); l != "" {
+				if v, err := strconv.Atoi(l); err == nil && v > 0 {
+					limit = v
+				}
+			}
+			nodes := graph.ListNodes(prefix, limit)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"nodes": nodes,
+				"count": len(nodes),
+			})
+		}
+
+	case http.MethodDelete:
+		nodeID := query.Get("node_id")
+		if nodeID == "" {
+			http.Error(w, "node_id is required", http.StatusBadRequest)
+			return
+		}
+		if err := graph.DeleteNode(nodeID); err != nil {
+			http.Error(w, "failed to delete node: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleKnowledgeStats returns stats for a knowledge graph.
+// GET: stats (query: graph)
+func handleKnowledgeStats(w http.ResponseWriter, r *http.Request, store KnowledgeStore, log logger.Logger) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if store == nil {
+		http.Error(w, "knowledge store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	graphName := r.URL.Query().Get("graph")
+	if graphName == "" {
+		http.Error(w, "graph is required", http.StatusBadRequest)
+		return
+	}
+
+	graph, ok := store.Get(graphName)
+	if !ok {
+		http.Error(w, "graph not found", http.StatusNotFound)
+		return
+	}
+
+	stats := graph.Stats()
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// writeJSON encodes v as JSON and writes it with the given status code.
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
 }

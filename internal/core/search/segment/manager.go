@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"runtime/debug"
 	rmetrics "runtime/metrics"
 	"sort"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"plastic-engine-core/internal/adapters/telemetry/metrics"
+	"plastic-engine-core/internal/core/search/knowledge"
 	"plastic-engine-core/internal/core/search/wal"
 
 	"go.opentelemetry.io/otel"
@@ -55,6 +58,41 @@ type mergeJob struct {
 	level    int
 }
 
+// termAccumulator buffers new term deltas for background drain to the adjacency matrix.
+type termAccumulator struct {
+	mu    sync.Mutex
+	terms map[string]int64 // field\x00term → df delta
+}
+
+// Add adds a DF delta for a term key.
+func (a *termAccumulator) Add(termKey string, delta int64) {
+	a.mu.Lock()
+	a.terms[termKey] += delta
+	a.mu.Unlock()
+}
+
+// AddBatch merges a map of DF deltas under a single lock acquisition.
+func (a *termAccumulator) AddBatch(deltas map[string]int64) {
+	a.mu.Lock()
+	for k, v := range deltas {
+		a.terms[k] += v
+	}
+	a.mu.Unlock()
+}
+
+// Drain returns and resets the accumulated deltas.
+func (a *termAccumulator) Drain() map[string]int64 {
+	a.mu.Lock()
+	if len(a.terms) == 0 {
+		a.mu.Unlock()
+		return nil
+	}
+	drained := a.terms
+	a.terms = make(map[string]int64, len(drained))
+	a.mu.Unlock()
+	return drained
+}
+
 // Manager orchestrates segments, handling indexing, searching, and merging.
 type Manager struct {
 	activeMu sync.Mutex   // protects: m.active (ingestion hot path)
@@ -66,7 +104,7 @@ type Manager struct {
 	// Disk segments (immutable, for reads)
 	segments []*DiskSegment
 
-	// Term registry (FST-backed)
+	// Term registry (optional, kept for backward compatibility)
 	registry TermRegistry
 	// ownsRegistry is true if this Manager created the registry and should close it
 	ownsRegistry bool
@@ -80,6 +118,15 @@ type Manager struct {
 	// Manifest tracks segments
 	manifest *Manifest
 
+	// Term accumulator: buffers new terms + DF deltas for background drain.
+	accumulator *termAccumulator
+
+	// Adjacency matrix for term relationships (optional, set via SetMatrix).
+	matrix *knowledge.AdjacencyMatrix
+
+	// Total indexed documents (local counter, no registry dependency).
+	totalDocs atomic.Int64
+
 	// Background workers
 	flushCh    chan struct{}
 	mergeCh    chan struct{}   // signal to check for merges
@@ -87,6 +134,10 @@ type Manager struct {
 	closeCh    chan struct{}
 	wg         sync.WaitGroup
 	closed     atomic.Bool
+
+	// I/O semaphore: bounds concurrent flush + merge disk I/O to prevent
+	// throughput collapse from competing writes.
+	ioSema chan struct{}
 
 	// Track segments being merged to avoid double-selection
 	mergingMu sync.Mutex
@@ -177,16 +228,22 @@ func NewManager(config Config) (*Manager, error) {
 	if config.MergeWorkers <= 0 {
 		config.MergeWorkers = 2
 	}
+	ioConcurrency := config.IOConcurrency
+	if ioConcurrency < 2 {
+		ioConcurrency = 2
+	}
 
 	m := &Manager{
 		registry:     registry,
 		ownsRegistry: ownsRegistry,
 		wal:          activeWAL,
 		config:       config,
+		accumulator:  &termAccumulator{terms: make(map[string]int64, 1024)},
 		flushCh:      make(chan struct{}, 1),
 		mergeCh:      make(chan struct{}, 1),
 		mergeJobCh:   make(chan mergeJob, config.MergeWorkers*2),
 		closeCh:      make(chan struct{}),
+		ioSema:       make(chan struct{}, ioConcurrency),
 		merging:      make(map[string]bool),
 	}
 
@@ -219,6 +276,14 @@ func NewManager(config Config) (*Manager, error) {
 	if err := m.replayWAL(); err != nil {
 		return nil, fmt.Errorf("replay wal: %w", err)
 	}
+
+	// Recover totalDocs from disk segments + active segment.
+	var totalDocs int64
+	for _, seg := range m.segments {
+		totalDocs += int64(seg.DocCount())
+	}
+	totalDocs += int64(m.active.DocCount())
+	m.totalDocs.Store(totalDocs)
 
 	// Start background workers
 	m.startBackgroundWorkers()
@@ -321,6 +386,10 @@ func (m *Manager) startBackgroundWorkers() {
 	// Real-time heap pressure monitor (safety net for unaccounted memory)
 	m.wg.Add(1)
 	go m.heapMonitor()
+
+	// Term accumulator drain worker (pushes to adjacency matrix)
+	m.wg.Add(1)
+	go m.drainWorker()
 }
 
 // flushWorker handles flushing the active segment.
@@ -388,7 +457,9 @@ func (m *Manager) syncWorker() {
 			return
 		case <-ticker.C:
 			m.wal.Sync()
-			m.registry.Sync()
+			if m.registry != nil {
+				m.registry.Sync()
+			}
 		}
 	}
 }
@@ -438,21 +509,37 @@ func (m *Manager) heapMonitor() {
 	}
 }
 
+// drainWorker periodically drains the term accumulator to the adjacency matrix.
+func (m *Manager) drainWorker() {
+	defer m.wg.Done()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.closeCh:
+			// Final drain on shutdown
+			m.drainTermsToMatrix()
+			return
+		case <-ticker.C:
+			m.drainTermsToMatrix()
+		}
+	}
+}
+
 // Index adds a document posting to the index.
 func (m *Manager) Index(ctx context.Context, field, term, docID string, tf int, positions []int) error {
 	if m.closed.Load() {
 		return fmt.Errorf("manager is closed")
 	}
 
-	// Get or create term ID
-	termID, err := m.registry.GetOrCreate(ctx, field, term)
-	if err != nil {
-		return fmt.Errorf("get term id: %w", err)
-	}
+	// Deterministic term key — no registry lookup, zero coordination.
+	termKey := field + "\x00" + term
 
 	// Log to WAL
 	if _, err := m.wal.AppendIndex(wal.IndexOp{
-		TermID:    termID,
+		TermID:    termKey,
 		DocID:     docID,
 		TF:        tf,
 		Positions: positions,
@@ -464,13 +551,14 @@ func (m *Manager) Index(ctx context.Context, field, term, docID string, tf int, 
 
 	// Add to active segment
 	m.activeMu.Lock()
-	m.active.Add(termID, docID, tf, positions)
+	m.active.Add(termKey, docID, tf, positions)
 	docCount := m.active.DocCount()
 	estimatedBytes := m.active.EstimatedBytes()
 	m.activeMu.Unlock()
 
-	// Update registry stats
-	m.registry.IncrementDF(termID, 1)
+	// Buffer term delta for background drain to adjacency matrix.
+	m.accumulator.Add(termKey, 1)
+	m.totalDocs.Add(1)
 
 	// Check if we need to flush (by docs or by bytes)
 	if m.needsFlush(docCount, estimatedBytes) {
@@ -506,14 +594,40 @@ func (m *Manager) IndexDocumentBatch(ctx context.Context, docs []DocumentBatch) 
 		return nil
 	}
 
-	// Backpressure: under high memory pressure, yield to let flush/GC catch up.
-	// This converts a hard cliff (OOM/GC thrash) into a gentle slowdown.
-	if m.pressureLevel.Load() >= 2 {
+	// Proportional backpressure from two independent signals:
+	// A) Heap pressure (heapMonitor): global memory nearing GOMEMLIMIT
+	// B) MemSegment fill ratio: local segment approaching flush threshold
+	//
+	// Signal B catches the case where heap is fine globally (e.g. 30% used)
+	// but a single MemSegment is growing toward 285MB and about to trigger
+	// a massive flush + GC storm.
+	m.activeMu.Lock()
+	estBytes := m.active.EstimatedBytes()
+	m.activeMu.Unlock()
+
+	flushBytes := m.config.FlushThresholdBytes
+	if flushBytes <= 0 {
+		flushBytes = 16 * 1024 * 1024
+	}
+	fillRatio := float64(estBytes*2) / float64(flushBytes) // 2x correction matches needsFlush
+
+	pressure := m.pressureLevel.Load()
+
+	if pressure >= 2 || fillRatio >= 0.9 {
+		// High pressure: force flush + proportional sleep 5-55ms.
 		select {
 		case m.flushCh <- struct{}{}:
 		default:
 		}
-		time.Sleep(5 * time.Millisecond)
+		r := fillRatio
+		if r > 1.0 {
+			r = 1.0
+		}
+		sleepMs := 5 + int(r*50)
+		time.Sleep(time.Duration(sleepMs) * time.Millisecond)
+	} else if pressure >= 1 || fillRatio >= 0.7 {
+		// Medium pressure: light yield to let flush catch up.
+		time.Sleep(1 * time.Millisecond)
 	}
 
 	// Pre-calculate total postings to pre-allocate allEntries in one shot.
@@ -524,58 +638,35 @@ func (m *Manager) IndexDocumentBatch(ctx context.Context, docs []DocumentBatch) 
 		}
 	}
 
-	// Phase 1: Resolve terms, build segment entries, encode WAL data.
-	_, resolveSpan := mgrTracer.Start(ctx, "index.resolve_terms")
-	resolveSpan.SetAttributes(
+	// Phase 1: Build segment entries + WAL data using deterministic term keys.
+	// No registry lookup needed — termKey = field + "\x00" + term (zero coordination).
+	_, buildSpan := mgrTracer.Start(ctx, "index.build_entries")
+	buildSpan.SetAttributes(
 		attribute.Int("docs", len(docs)),
 		attribute.Int("postings", totalPostings),
 	)
 
-	// Collect unique terms for batch resolution.
-	uniqueTerms := make(map[string]TermLookup, totalPostings/2)
-	for _, doc := range docs {
-		for field, terms := range doc.FieldTerms {
-			for _, tp := range terms {
-				key := field + "\x00" + tp.Term
-				if _, exists := uniqueTerms[key]; !exists {
-					uniqueTerms[key] = TermLookup{Field: field, Term: tp.Term}
-				}
-			}
-		}
-	}
-
-	// Batch resolve: 1 sync.Map scan + 1 Pebble read pass + 1 Pebble batch write.
-	var termCache map[string]string
-	if pebbleReg, ok := m.registry.(*PebbleTermRegistry); ok {
-		lookups := make([]TermLookup, 0, len(uniqueTerms))
-		for _, tl := range uniqueTerms {
-			lookups = append(lookups, tl)
-		}
-		var err error
-		termCache, err = pebbleReg.GetOrCreateBatch(lookups)
-		if err != nil {
-			resolveSpan.End()
-			return fmt.Errorf("batch resolve terms: %w", err)
-		}
-	} else {
-		// Fallback: resolve one-by-one for non-Pebble registries.
-		termCache = make(map[string]string, len(uniqueTerms))
-		for key, tl := range uniqueTerms {
-			termID, err := m.registry.GetOrCreate(ctx, tl.Field, tl.Term)
-			if err != nil {
-				resolveSpan.End()
-				return fmt.Errorf("get or create term: %w", err)
-			}
-			termCache[key] = termID
-		}
-	}
-
-	resolveSpan.SetAttributes(attribute.Int("unique_terms", len(uniqueTerms)))
-
-	// Build segment entries and WAL data using resolved term IDs.
 	allEntries := make([]SegmentEntry, 0, totalPostings)
 	walEncoded := make([][]byte, 0, len(docs))
-	dfDeltas := make(map[string]int64, len(uniqueTerms))
+	dfDeltas := make(map[string]int64, totalPostings/2)
+
+	// Intern table: field → term → interned "field\x00term" key.
+	// For 1k docs with ~850 unique (field,term) pairs, this reduces
+	// string concatenations from ~50k to ~850.
+	internedKeys := make(map[string]map[string]string)
+	getTermKey := func(field, term string) string {
+		byTerm, ok := internedKeys[field]
+		if !ok {
+			byTerm = make(map[string]string)
+			internedKeys[field] = byTerm
+		}
+		if key, ok := byTerm[term]; ok {
+			return key
+		}
+		key := field + "\x00" + term
+		byTerm[term] = key
+		return key
+	}
 
 	for _, doc := range docs {
 		walFields := make([]wal.DocFieldTerms, 0, len(doc.FieldTerms))
@@ -584,24 +675,23 @@ func (m *Manager) IndexDocumentBatch(ctx context.Context, docs []DocumentBatch) 
 			walPostings := make([]wal.DocTermPosting, 0, len(terms))
 
 			for _, tp := range terms {
-				key := field + "\x00" + tp.Term
-				termID := termCache[key]
+				termKey := getTermKey(field, tp.Term)
 
 				allEntries = append(allEntries, SegmentEntry{
-					TermID:    termID,
+					TermID:    termKey,
 					DocID:     doc.DocID,
 					TF:        tp.TF,
 					Positions: tp.Positions,
 				})
 
 				walPostings = append(walPostings, wal.DocTermPosting{
-					TermID:    termID,
+					TermID:    termKey,
 					Term:      tp.Term,
 					TF:        tp.TF,
 					Positions: tp.Positions,
 				})
 
-				dfDeltas[termID]++
+				dfDeltas[termKey]++
 			}
 
 			walFields = append(walFields, wal.DocFieldTerms{
@@ -615,7 +705,7 @@ func (m *Manager) IndexDocumentBatch(ctx context.Context, docs []DocumentBatch) 
 			Fields: walFields,
 		}))
 	}
-	resolveSpan.End()
+	buildSpan.End()
 
 	// Phase 2: WAL write
 	_, walSpan := mgrTracer.Start(ctx, "index.wal_write")
@@ -637,15 +727,9 @@ func (m *Manager) IndexDocumentBatch(ctx context.Context, docs []DocumentBatch) 
 	m.activeMu.Unlock()
 	addSpan.End()
 
-	// Phase 4: DF increments
-	if pebbleReg, ok := m.registry.(*PebbleTermRegistry); ok {
-		pebbleReg.IncrementDFBatch(dfDeltas)
-	} else {
-		for termID, delta := range dfDeltas {
-			m.registry.IncrementDF(termID, delta)
-		}
-	}
-
+	// Phase 4: Buffer term deltas for background drain to adjacency matrix.
+	m.accumulator.AddBatch(dfDeltas)
+	m.totalDocs.Add(int64(len(docs)))
 	m.indexedDocs.Add(int64(len(docs)))
 
 	if m.needsFlush(docCount, estimatedBytes) {
@@ -672,25 +756,27 @@ type TermPosting struct {
 }
 
 // Search finds documents matching a term.
-func (m *Manager) Search(ctx context.Context, field, term string) ([]Hit, error) {
+func (m *Manager) Search(_ context.Context, field, term string) ([]Hit, error) {
 	if m.closed.Load() {
 		return nil, fmt.Errorf("manager is closed")
 	}
 
 	m.searches.Add(1)
 
-	// Get term ID from registry
-	termID, found := m.registry.Get(ctx, field, term)
-	if !found {
-		return nil, nil
-	}
-
-	return m.SearchByTermID(termID)
+	// Deterministic key — no registry lookup.
+	termKey := field + "\x00" + term
+	return m.SearchByTermID(termKey)
 }
 
 // searchSema limits concurrent disk-segment search goroutines to prevent goroutine explosion
-// under concurrent queries with many segments. 8 allows good parallelism within 2-CPU containers.
-var searchSema = make(chan struct{}, 8)
+// under concurrent queries with many segments. Scales with GOMAXPROCS (min 8).
+var searchSema = func() chan struct{} {
+	n := runtime.GOMAXPROCS(0)
+	if n < 8 {
+		n = 8
+	}
+	return make(chan struct{}, n)
+}()
 
 // SearchByTermID searches using a term ID directly.
 func (m *Manager) SearchByTermID(termID string) ([]Hit, error) {
@@ -703,48 +789,109 @@ func (m *Manager) SearchByTermID(termID string) ([]Hit, error) {
 	copy(segments, m.segments)
 	m.segMu.RUnlock()
 
-	var allHits []Hit
-
-	// Search active segment
-	hits := active.Search(termID)
-	allHits = append(allHits, hits...)
+	// Pre-allocate results per segment (index-based, no mutex needed).
+	segResults := make([][]Hit, len(segments)+1) // +1 for active segment
+	segResults[0] = active.Search(termID)
 
 	// Search disk segments in parallel (bounded concurrency)
 	var wg sync.WaitGroup
-	var hitsMu sync.Mutex
-
-	for _, seg := range segments {
+	for i, seg := range segments {
 		wg.Add(1)
 		searchSema <- struct{}{} // acquire slot
-		go func(s *DiskSegment) {
+		go func(idx int, s *DiskSegment) {
 			defer wg.Done()
 			defer func() { <-searchSema }() // release slot
-			hits := s.Search(termID)
-			if len(hits) > 0 {
-				hitsMu.Lock()
-				allHits = append(allHits, hits...)
-				hitsMu.Unlock()
-			}
-		}(seg)
+			segResults[idx+1] = s.Search(termID)
+		}(i, seg)
 	}
-
 	wg.Wait()
+
+	// Merge without mutex — count total first, then single allocation.
+	total := 0
+	for _, r := range segResults {
+		total += len(r)
+	}
+	if total == 0 {
+		return nil, nil
+	}
+	allHits := make([]Hit, 0, total)
+	for _, r := range segResults {
+		allHits = append(allHits, r...)
+	}
 	return allHits, nil
 }
 
-// GetDF returns the global document frequency for a term.
+// GetDF returns the global document frequency for a term, computed from all segments.
 func (m *Manager) GetDF(termID string) int64 {
-	return m.registry.GetDF(termID)
+	m.activeMu.Lock()
+	total := m.active.GetLocalDF(termID)
+	m.activeMu.Unlock()
+
+	m.segMu.RLock()
+	segments := make([]*DiskSegment, len(m.segments))
+	copy(segments, m.segments)
+	m.segMu.RUnlock()
+
+	if len(segments) <= 4 {
+		// Sequential for small segment counts (goroutine overhead > savings).
+		for _, seg := range segments {
+			total += seg.GetLocalDF(termID)
+		}
+		return total
+	}
+
+	// Parallel for many segments.
+	results := make([]int64, len(segments))
+	var wg sync.WaitGroup
+	for i, seg := range segments {
+		wg.Add(1)
+		go func(idx int, s *DiskSegment) {
+			defer wg.Done()
+			results[idx] = s.GetLocalDF(termID)
+		}(i, seg)
+	}
+	wg.Wait()
+	for _, r := range results {
+		total += r
+	}
+	return total
 }
 
 // GetTotalDocs returns the total number of indexed documents.
 func (m *Manager) GetTotalDocs() int64 {
-	return m.registry.GetTotalDocs()
+	return m.totalDocs.Load()
 }
 
 // CreateAlias creates a term alias.
 func (m *Manager) CreateAlias(field, newTerm, existingTermID string) error {
+	if m.registry == nil {
+		return fmt.Errorf("no registry configured for alias support")
+	}
 	return m.registry.CreateAlias(field, newTerm, existingTermID)
+}
+
+// SetMatrix attaches an adjacency matrix to this manager.
+// The background drain goroutine will push accumulated term deltas to it.
+func (m *Manager) SetMatrix(matrix *knowledge.AdjacencyMatrix) {
+	m.matrix = matrix
+}
+
+// Matrix returns the adjacency matrix (may be nil).
+func (m *Manager) Matrix() *knowledge.AdjacencyMatrix {
+	return m.matrix
+}
+
+// drainTermsToMatrix drains accumulated term deltas to the adjacency matrix.
+func (m *Manager) drainTermsToMatrix() {
+	if m.matrix == nil {
+		return
+	}
+	deltas := m.accumulator.Drain()
+	if len(deltas) == 0 {
+		return
+	}
+	// Best-effort: log errors but don't block indexing.
+	_ = m.matrix.IngestTermBatch(deltas)
 }
 
 // UpdateFlushThresholds allows the shard manager to adjust flush thresholds
@@ -801,19 +948,23 @@ func (m *Manager) doFlush() {
 		return
 	}
 
-	// Swap active segment
+	// Swap active segment — capture old sizes for capacity hints.
 	oldActive := m.active
 	docCount := oldActive.DocCount()
+	termCount := oldActive.TermCount()
 	newActiveID := fmt.Sprintf("mem_%d", time.Now().UnixNano())
-	m.active = NewMemSegment(newActiveID)
+	// Pre-allocate at 75% of previous generation to avoid map growth churn.
+	m.active = NewMemSegmentWithHints(newActiveID, termCount*3/4, docCount*3/4)
 	m.manifest.ActiveID = newActiveID
 	m.activeMu.Unlock()
 
 	flushStart := time.Now()
 
-	// Flush old active to disk
+	// Flush old active to disk (bounded by I/O semaphore).
+	m.ioSema <- struct{}{} // acquire I/O slot
 	segmentDir := filepath.Join(m.config.DataDir, "segments")
 	diskSeg, err := FlushMemSegment(oldActive, segmentDir)
+	<-m.ioSema // release I/O slot
 	if err != nil {
 		// Put it back if flush failed
 		m.activeMu.Lock()
@@ -854,9 +1005,10 @@ func (m *Manager) doFlush() {
 	// Save manifest
 	m.manifest.Save()
 
-	// Truncate WAL in background — the segment is already persisted and manifest saved,
-	// so new writes to WAL will just be replayed harmlessly if we crash before truncation.
-	go m.wal.Truncate()
+	// Rotate WAL in background — the segment is already persisted and manifest saved,
+	// so new writes to WAL will just be replayed harmlessly if we crash before rotation.
+	// RotateTruncate holds the lock for ~1μs (vs 1-10ms for Truncate).
+	go m.wal.RotateTruncate()
 
 	// Trigger merge check
 	select {
@@ -924,8 +1076,10 @@ func (m *Manager) scheduleMerge() {
 func (m *Manager) executeMerge(job mergeJob) {
 	mergeStart := time.Now()
 
-	// Phase 1: Merge segments (I/O heavy, no lock needed)
+	// Phase 1: Merge segments (I/O heavy, bounded by sema)
+	m.ioSema <- struct{}{} // acquire I/O slot
 	merged, err := m.mergeSegments(job.segments, job.level)
+	<-m.ioSema // release I/O slot
 
 	// Unmark merging segments regardless of success
 	m.mergingMu.Lock()
@@ -1185,10 +1339,13 @@ func (m *Manager) Close() error {
 		m.wal.Close()
 	}
 
-	// Close registry only if we own it (not shared)
+	// Close registry only if we own it (not shared) and it exists
 	if m.registry != nil && m.ownsRegistry {
 		m.registry.Close()
 	}
+
+	// Drain any remaining accumulated terms (best-effort)
+	_ = m.accumulator.Drain()
 
 	// Close all segments
 	m.segMu.Lock()
@@ -1213,8 +1370,10 @@ func (m *Manager) Stats() ManagerStats {
 	m.segMu.RLock()
 	diskSegments := len(m.segments)
 	totalDiskDocs := 0
+	totalTerms := 0
 	for _, seg := range m.segments {
 		totalDiskDocs += seg.DocCount()
+		totalTerms += seg.TermCount()
 	}
 	m.segMu.RUnlock()
 
@@ -1225,8 +1384,8 @@ func (m *Manager) Stats() ManagerStats {
 		TotalDiskDocs:   totalDiskDocs,
 		IndexedDocs:     m.indexedDocs.Load(),
 		Searches:        m.searches.Load(),
-		TotalTerms:      int(m.registry.GetTermCount()),
-		TotalDocs:       m.registry.GetTotalDocs(),
+		TotalTerms:      activeTermCount + totalTerms,
+		TotalDocs:       m.totalDocs.Load(),
 	}
 }
 
@@ -1242,14 +1401,19 @@ type ManagerStats struct {
 	Searches        int64
 }
 
-// Registry returns the term registry.
+// Registry returns the term registry (may be nil if no registry is configured).
 func (m *Manager) Registry() TermRegistry {
 	return m.registry
 }
 
 // PebbleRegistry returns the Pebble-backed term registry for advanced term operations.
+// Returns nil if no registry is configured.
 func (m *Manager) PebbleRegistry() *PebbleTermRegistry {
-	return m.registry.(*PebbleTermRegistry)
+	if m.registry == nil {
+		return nil
+	}
+	reg, _ := m.registry.(*PebbleTermRegistry)
+	return reg
 }
 
 // FSTRegistry is an alias for PebbleRegistry kept for backward compatibility.
@@ -1257,24 +1421,217 @@ func (m *Manager) FSTRegistry() *PebbleTermRegistry {
 	return m.PebbleRegistry()
 }
 
-// ListTerms returns all terms, optionally filtered by field.
-func (m *Manager) ListTerms(ctx context.Context, field string, limit, offset int) ([]TermEntry, int64, error) {
-	return m.PebbleRegistry().ListTerms(ctx, field, limit, offset)
+// GetTermsWithPrefix returns all termIDs (field\x00term keys) matching a prefix.
+// Used by the query executor for prefix search without registry.
+func (m *Manager) GetTermsWithPrefix(_ context.Context, field, prefix string) []string {
+	searchPrefix := field + "\x00" + prefix
+
+	// Collect from active segment
+	m.activeMu.Lock()
+	activeTerms := m.active.GetTermsWithPrefix(searchPrefix)
+	m.activeMu.Unlock()
+
+	// Collect from disk segments
+	m.segMu.RLock()
+	segments := make([]*DiskSegment, len(m.segments))
+	copy(segments, m.segments)
+	m.segMu.RUnlock()
+
+	seen := make(map[string]struct{}, len(activeTerms))
+	for _, t := range activeTerms {
+		seen[t] = struct{}{}
+	}
+
+	for _, seg := range segments {
+		for _, t := range seg.GetTermsWithPrefix(searchPrefix) {
+			if _, exists := seen[t]; !exists {
+				seen[t] = struct{}{}
+				activeTerms = append(activeTerms, t)
+			}
+		}
+	}
+
+	return activeTerms
 }
 
-// ListTermsByPrefix returns terms matching a prefix.
-func (m *Manager) ListTermsByPrefix(ctx context.Context, field, prefix string, limit int) ([]TermEntry, error) {
-	return m.PebbleRegistry().ListTermsByPrefix(ctx, field, prefix, limit)
+// ListTerms returns all terms, optionally filtered by field, by scanning segments.
+func (m *Manager) ListTerms(_ context.Context, field string, limit, offset int) ([]TermEntry, int64, error) {
+	searchPrefix := ""
+	if field != "" {
+		searchPrefix = field + "\x00"
+	}
+
+	entries := m.collectTermEntries(searchPrefix, field)
+
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Field != entries[j].Field {
+			return entries[i].Field < entries[j].Field
+		}
+		return entries[i].Term < entries[j].Term
+	})
+
+	total := int64(len(entries))
+	if offset > 0 && offset < len(entries) {
+		entries = entries[offset:]
+	} else if offset >= len(entries) {
+		return nil, total, nil
+	}
+	if limit > 0 && len(entries) > limit {
+		entries = entries[:limit]
+	}
+	return entries, total, nil
 }
 
-// ListTermsByFuzzy returns terms within Levenshtein distance of the query.
-func (m *Manager) ListTermsByFuzzy(ctx context.Context, field, query string, maxDistance, limit int) ([]TermEntry, error) {
-	return m.PebbleRegistry().ListTermsByFuzzy(ctx, field, query, maxDistance, limit)
+// ListTermsByPrefix returns terms matching a prefix by scanning segments.
+func (m *Manager) ListTermsByPrefix(_ context.Context, field, prefix string, limit int) ([]TermEntry, error) {
+	searchPrefix := field + "\x00" + prefix
+	entries := m.collectTermEntries(searchPrefix, field)
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Term < entries[j].Term
+	})
+	if limit > 0 && len(entries) > limit {
+		entries = entries[:limit]
+	}
+	return entries, nil
 }
 
-// ListTermsByRegex returns terms matching a regex pattern.
-func (m *Manager) ListTermsByRegex(ctx context.Context, field, pattern string, limit int) ([]TermEntry, error) {
-	return m.PebbleRegistry().ListTermsByRegex(ctx, field, pattern, limit)
+// ListTermsByFuzzy returns terms within Levenshtein distance of the query by scanning segments.
+func (m *Manager) ListTermsByFuzzy(_ context.Context, field, query string, maxDistance, limit int) ([]TermEntry, error) {
+	if maxDistance < 1 {
+		maxDistance = 1
+	}
+	if maxDistance > 3 {
+		maxDistance = 3
+	}
+
+	// Scan all terms for the field
+	searchPrefix := field + "\x00"
+	allTermIDs := m.collectAllTermIDs(searchPrefix)
+
+	var entries []TermEntry
+	for _, termID := range allTermIDs {
+		// Extract term from termID (field\x00term)
+		term := termID[len(searchPrefix):]
+		if levenshteinDistance(query, term) <= maxDistance {
+			entries = append(entries, TermEntry{
+				Field:  field,
+				Term:   term,
+				TermID: termID,
+				DF:     m.GetDF(termID),
+			})
+			if limit > 0 && len(entries) >= limit {
+				break
+			}
+		}
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Term < entries[j].Term
+	})
+	if limit > 0 && len(entries) > limit {
+		entries = entries[:limit]
+	}
+	return entries, nil
+}
+
+// ListTermsByRegex returns terms matching a regex pattern by scanning segments.
+func (m *Manager) ListTermsByRegex(_ context.Context, field, pattern string, limit int) ([]TermEntry, error) {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid regex: %w", err)
+	}
+
+	searchPrefix := field + "\x00"
+	allTermIDs := m.collectAllTermIDs(searchPrefix)
+
+	var entries []TermEntry
+	for _, termID := range allTermIDs {
+		term := termID[len(searchPrefix):]
+		if re.MatchString(term) {
+			entries = append(entries, TermEntry{
+				Field:  field,
+				Term:   term,
+				TermID: termID,
+				DF:     m.GetDF(termID),
+			})
+			if limit > 0 && len(entries) >= limit {
+				break
+			}
+		}
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Term < entries[j].Term
+	})
+	if limit > 0 && len(entries) > limit {
+		entries = entries[:limit]
+	}
+	return entries, nil
+}
+
+// collectTermEntries gathers unique TermEntry from all segments matching the given prefix.
+func (m *Manager) collectTermEntries(prefix, field string) []TermEntry {
+	allTermIDs := m.collectAllTermIDs(prefix)
+
+	entries := make([]TermEntry, 0, len(allTermIDs))
+	for _, termID := range allTermIDs {
+		// Parse field and term from termID: field\x00term
+		sep := -1
+		for i := 0; i < len(termID); i++ {
+			if termID[i] == 0 {
+				sep = i
+				break
+			}
+		}
+		if sep < 0 {
+			continue
+		}
+		entryField := termID[:sep]
+		entryTerm := termID[sep+1:]
+		if field != "" && entryField != field {
+			continue
+		}
+		entries = append(entries, TermEntry{
+			Field:  entryField,
+			Term:   entryTerm,
+			TermID: termID,
+			DF:     m.GetDF(termID),
+		})
+	}
+	return entries
+}
+
+// collectAllTermIDs returns unique termIDs matching the prefix across all segments.
+func (m *Manager) collectAllTermIDs(prefix string) []string {
+	m.activeMu.Lock()
+	activeTerms := m.active.GetTermsWithPrefix(prefix)
+	m.activeMu.Unlock()
+
+	m.segMu.RLock()
+	segments := make([]*DiskSegment, len(m.segments))
+	copy(segments, m.segments)
+	m.segMu.RUnlock()
+
+	seen := make(map[string]struct{}, len(activeTerms))
+	result := make([]string, 0, len(activeTerms))
+	for _, t := range activeTerms {
+		if _, exists := seen[t]; !exists {
+			seen[t] = struct{}{}
+			result = append(result, t)
+		}
+	}
+
+	for _, seg := range segments {
+		for _, t := range seg.GetTermsWithPrefix(prefix) {
+			if _, exists := seen[t]; !exists {
+				seen[t] = struct{}{}
+				result = append(result, t)
+			}
+		}
+	}
+
+	return result
 }
 
 // Load loads the manifest from disk.

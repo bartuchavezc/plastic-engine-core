@@ -68,6 +68,10 @@ func (c NodeConfig) SegmentCfg() Config {
 	cfg.MergeWorkers = c.MergeWorkers
 	cfg.FlushInterval = c.FlushInterval
 	cfg.MergeInterval = c.MergeInterval
+	// IOConcurrency is per-shard (per-Manager), not global.
+	// Keep it tight: 1 flush + 1 merge max per shard to avoid I/O storms
+	// when multiple shards flush/merge simultaneously.
+	cfg.IOConcurrency = 2
 	return cfg
 }
 
@@ -103,10 +107,15 @@ func TuneForNode(profile NodeResourceProfile) NodeConfig {
 	// PebbleTermRegistry is heap-light, so we can dedicate more RAM to indexing.
 	// needsFlush() applies a 2x correction for Go map/GC overhead.
 	//
-	// 3800MB/4shards: 3800*30%/(4*2) ≈ 142MB per shard
-	// 7600MB/4shards: 7600*30%/(4*2) ≈ 285MB per shard
+	// Upper cap at 64MB per MemSegment: Go maps are pointer-heavy and cause
+	// long GC mark phases proportional to live pointer count. At 285MB
+	// (previous cap=512MB on 8GB nodes), GC STW pauses exceeded 1.8s.
+	// Smaller, more frequent flushes keep GC pauses short and steady.
+	//
+	// 3800MB/4shards: 3800*30%/(4*2) ≈ 142MB → capped at 64MB
+	// 2000MB/4shards: 2000*30%/(4*2) ≈  37MB
 	totalIndexingMB := memMB * 30 / 100
-	flushBytes := clampInt64(totalIndexingMB*1024*1024/(int64(shards)*2), 16*1024*1024, 512*1024*1024)
+	flushBytes := clampInt64(totalIndexingMB*1024*1024/(int64(shards)*2), 16*1024*1024, 64*1024*1024)
 
 	// MaxBatchSize: docs to accumulate before flushing.
 	// Assumes ~200KB average tokenized doc (realistic with ngrams).

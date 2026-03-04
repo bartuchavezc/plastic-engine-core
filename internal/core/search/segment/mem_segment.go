@@ -41,6 +41,19 @@ func NewMemSegment(id string) *MemSegment {
 	}
 }
 
+// NewMemSegmentWithHints creates a new in-memory segment with pre-allocated map capacities.
+// Use termHint/docHint from the previous generation (e.g. 75% of old segment sizes)
+// to avoid map growth during the next ingestion cycle.
+func NewMemSegmentWithHints(id string, termHint, docHint int) *MemSegment {
+	return &MemSegment{
+		id:        id,
+		postings:  make(map[string]*memPostingList, termHint),
+		termDF:    make(map[string]int64, termHint),
+		docs:      make(map[string]bool, docHint),
+		createdAt: time.Now().UTC(),
+	}
+}
+
 // ID returns the segment identifier.
 func (s *MemSegment) ID() string {
 	return s.id
@@ -321,6 +334,21 @@ func (s *MemSegment) Clear() {
 	s.estimatedBytes = 0
 	s.minDocID = ""
 	s.maxDocID = ""
+}
+
+// GetTermsWithPrefix returns all termIDs that start with the given prefix.
+// Used for prefix search when scanning segments directly (no registry).
+func (s *MemSegment) GetTermsWithPrefix(prefix string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var result []string
+	for termID := range s.postings {
+		if len(termID) >= len(prefix) && termID[:len(prefix)] == prefix {
+			result = append(result, termID)
+		}
+	}
+	return result
 }
 
 // HasDoc returns true if the document exists in this segment.
