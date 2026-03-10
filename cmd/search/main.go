@@ -150,7 +150,8 @@ func main() {
 		}
 		return shard.Segments, true
 	}
-	searchService := searchquery.NewSegmentSearchService(getSegmentManager, log)
+	queryAnalyzer := searchquery.NewStandardQueryAnalyzer("english")
+	searchService := searchquery.NewSegmentSearchService(getSegmentManager, queryAnalyzer, log)
 
 	// Create term lookup service for term index APIs
 	termLookupService := searchquery.NewTermLookupService(manager, log)

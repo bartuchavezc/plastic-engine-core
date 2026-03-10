@@ -11,6 +11,8 @@ import (
 
 	"plastic-engine-core/internal/core/cluster/indexes"
 	"plastic-engine-core/internal/core/search/segment"
+
+	pebbledb "github.com/cockroachdb/pebble"
 )
 
 // ManagerConfig holds configuration for the shard manager.
@@ -22,11 +24,8 @@ type ManagerConfig struct {
 
 	// NodeResources overrides auto-detection of CPU and memory.
 	// Leave zero to auto-detect from the OS (recommended).
-	// The coordinator can push per-node overrides by populating this field.
 	NodeResources segment.NodeResourceProfile
 }
-
-// Note: Migrated from pebble to segment-based storage
 
 // Assignment describes how a shard should look when assigned to this node.
 type Assignment struct {
@@ -56,9 +55,12 @@ type Manager struct {
 	registryErr    error
 	registryConfig *segment.MergeConfig
 
-	// nodeConfig holds auto-tuned (or coordinator-overridden) resource configuration.
+	// nodeConfig holds auto-tuned resource configuration.
 	nodeConfig    segment.NodeConfig
-	nodeResources segment.NodeResourceProfile // kept for re-tune on Sync
+	nodeResources segment.NodeResourceProfile
+
+	// sharedCache is the Pebble block cache shared by all shard instances.
+	sharedCache *pebbledb.Cache
 
 	loadOnce sync.Once
 	loadErr  error
@@ -70,12 +72,16 @@ func NewManager(rootDir string) *Manager {
 }
 
 // NewManagerWithConfig builds a Manager with the given configuration.
-// Node resources (CPU, memory) are auto-detected unless overridden in config.NodeResources.
 func NewManagerWithConfig(config ManagerConfig) *Manager {
 	nodeCfg := segment.TuneForNode(config.NodeResources)
 	log.Printf("[autotune] cpus=%d mem=%dMB shards=%d → %s",
 		config.NodeResources.CPUCount, config.NodeResources.MemoryLimitMB,
 		config.NodeResources.ShardCount, nodeCfg)
+
+	var sharedCache *pebbledb.Cache
+	if nodeCfg.BlockCacheSize > 0 {
+		sharedCache = pebbledb.NewCache(nodeCfg.BlockCacheSize)
+	}
 
 	return &Manager{
 		rootDir:        config.RootDir,
@@ -83,12 +89,11 @@ func NewManagerWithConfig(config ManagerConfig) *Manager {
 		registryConfig: config.TermRegistryMergeConfig,
 		nodeConfig:     nodeCfg,
 		nodeResources:  config.NodeResources,
+		sharedCache:    sharedCache,
 	}
 }
 
 // NodeConfig returns the auto-tuned resource configuration for this node.
-// Callers creating ShardWorkers should use NodeConfig().WorkerMaxWorkers,
-// WorkerMaxBatchSize, WorkerQueueCapacity to build a ShardWorkerConfig.
 func (m *Manager) NodeConfig() segment.NodeConfig {
 	return m.nodeConfig
 }
@@ -115,8 +120,6 @@ func (m *Manager) ensureGlobalRegistry() error {
 }
 
 // Sync ensures that every assigned shard is available locally.
-// On the first call with assignments, re-tunes node config using the real shard count
-// (total shards assigned to this node across all indices).
 func (m *Manager) Sync(assignments []Assignment) error {
 	m.loadOnce.Do(func() {
 		m.loadErr = m.loadExistingShards()
@@ -125,9 +128,6 @@ func (m *Manager) Sync(assignments []Assignment) error {
 		return m.loadErr
 	}
 
-	// Re-tune with real shard count if it differs from the initial guess.
-	// This happens once: the first Sync after startup tells us how many shards
-	// the coordinator assigned to this node (across all indices).
 	if len(assignments) > 0 {
 		m.retune(len(assignments))
 	}
@@ -142,7 +142,6 @@ func (m *Manager) Sync(assignments []Assignment) error {
 }
 
 func (m *Manager) ensureLocalShard(assignment Assignment) error {
-	// Ensure global registry exists
 	if err := m.ensureGlobalRegistry(); err != nil {
 		return err
 	}
@@ -154,7 +153,6 @@ func (m *Manager) ensureLocalShard(assignment Assignment) error {
 
 		m.mu.Lock()
 		existing.Info = assignment
-		// Reopen segment manager if it's closed (e.g., after restart)
 		if existing.Segments == nil {
 			segmentMgr, err := segment.NewManager(m.segmentConfig(m.shardPath(assignment.ID)))
 			if err != nil {
@@ -198,25 +196,15 @@ func (m *Manager) openShard(assignment Assignment) error {
 }
 
 // retune recalculates node config with the real shard count.
-// Updates nodeConfig and propagates new flush thresholds to already-opened shards.
 func (m *Manager) retune(shardCount int) {
 	profile := m.nodeResources
 	if profile.ShardCount == shardCount {
-		return // already tuned with correct count
+		return
 	}
 	profile.ShardCount = shardCount
 	newCfg := segment.TuneForNode(profile)
 	log.Printf("[autotune] retune: shards=%d → %s", shardCount, newCfg)
 	m.nodeConfig = newCfg
-
-	// Propagate to already-opened segment managers (from loadExistingShards).
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	for _, shard := range m.shards {
-		if shard.Segments != nil {
-			shard.Segments.UpdateFlushThresholds(newCfg.FlushThresholdBytes, newCfg.FlushThreshold)
-		}
-	}
 }
 
 // segmentConfig builds a segment.Config for a shard using auto-tuned node config.
@@ -224,6 +212,7 @@ func (m *Manager) segmentConfig(dataDir string) segment.Config {
 	cfg := m.nodeConfig.SegmentCfg()
 	cfg.DataDir = dataDir
 	cfg.TermRegistry = m.globalRegistry
+	cfg.Cache = m.sharedCache
 	return cfg
 }
 
@@ -232,7 +221,7 @@ func (m *Manager) shardPath(id string) string {
 }
 
 func (m *Manager) replicateShard(assignment Assignment) {
-	// TODO: implement replication pipeline (snapshot, copy segments, validation, open segment manager, mark ready).
+	// TODO: implement replication pipeline
 }
 
 func (m *Manager) existsLocal(id string) bool {
@@ -242,7 +231,7 @@ func (m *Manager) existsLocal(id string) bool {
 	return ok
 }
 
-// Close releases all segment managers managed by the shard manager.
+// Close releases all segment managers.
 func (m *Manager) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -258,12 +247,16 @@ func (m *Manager) Close() error {
 	}
 	m.shards = make(map[string]*Shard)
 
-	// Close global registry after all shards are closed
 	if m.globalRegistry != nil {
 		if err := m.globalRegistry.Close(); err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("close global registry: %w", err)
 		}
 		m.globalRegistry = nil
+	}
+
+	if m.sharedCache != nil {
+		m.sharedCache.Unref()
+		m.sharedCache = nil
 	}
 
 	return firstErr
@@ -291,37 +284,29 @@ func (m *Manager) GetShard(id string) (*Shard, bool) {
 }
 
 // UnloadIndex closes and removes all shards belonging to the specified index.
-// It also deletes the shard directories from disk.
 func (m *Manager) UnloadIndex(indexID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	var firstErr error
-	var unloadedCount int
 
-	// Find and remove all shards for this index
 	for id, shard := range m.shards {
 		if shard.Info.IndexID != indexID {
 			continue
 		}
 
-		// Close the segment manager
 		if shard.Segments != nil {
 			if err := shard.Segments.Close(); err != nil && firstErr == nil {
 				firstErr = fmt.Errorf("close shard %s: %w", id, err)
 			}
 		}
 
-		// Remove from memory
 		delete(m.shards, id)
 
-		// Delete the shard directory
 		shardPath := m.shardPath(id)
 		if err := os.RemoveAll(shardPath); err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("remove shard directory %s: %w", shardPath, err)
 		}
-
-		unloadedCount++
 	}
 
 	return firstErr
@@ -358,7 +343,6 @@ func (m *Manager) loadExistingShards() error {
 		return fmt.Errorf("create data dir %s: %w", m.rootDir, err)
 	}
 
-	// Initialize global registry first
 	if err := m.ensureGlobalRegistry(); err != nil {
 		return err
 	}
@@ -376,7 +360,6 @@ func (m *Manager) loadExistingShards() error {
 			continue
 		}
 		id := entry.Name()
-		// Skip the global registry directory
 		if id == "_global_registry" {
 			continue
 		}

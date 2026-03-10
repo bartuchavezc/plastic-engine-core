@@ -509,25 +509,14 @@ func ValidateCreateRequest(req CreateIndexRequest) error {
 		return NewValidationError(fmt.Sprintf("unsupported default analyzer %q", req.DefaultAnalyzer))
 	}
 
-	// Validate tokenizers and analyzers in field mappings
+	// Per-field analyzer/tokenizer overrides are not supported.
+	// All text fields use the index-level DefaultAnalyzer and DefaultTokenizer.
 	for _, field := range req.FieldMappings {
-		if field.Type == FieldTypeText {
-			// Text fields use tokenizers and analyzers
-			tokenizer := field.Tokenizer
-			if tokenizer == "" {
-				tokenizer = req.DefaultTokenizer
-			}
-			if !IsValidTokenizer(tokenizer) {
-				return NewValidationError(fmt.Sprintf("unsupported tokenizer %q for field %q", tokenizer, field.Name))
-			}
-
-			analyzer := field.Analyzer
-			if analyzer == "" {
-				analyzer = req.DefaultAnalyzer
-			}
-			if !IsValidAnalyzer(analyzer) {
-				return NewValidationError(fmt.Sprintf("unsupported analyzer %q for field %q", analyzer, field.Name))
-			}
+		if field.Analyzer != "" {
+			return NewValidationError(fmt.Sprintf("per-field analyzer is not supported (field %q); use default_analyzer at index level", field.Name))
+		}
+		if field.Tokenizer != "" {
+			return NewValidationError(fmt.Sprintf("per-field tokenizer is not supported (field %q); use default_tokenizer at index level", field.Name))
 		}
 	}
 

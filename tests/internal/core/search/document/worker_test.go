@@ -16,10 +16,7 @@ func TestShardWorkerProcessesDocument(t *testing.T) {
 
 	dir := t.TempDir()
 	segMgr, err := segment.NewManager(segment.Config{
-		FlushThreshold:      1000,
-		MaxSegmentsPerLevel: 5,
-		LevelSizeMultiplier: 10,
-		DataDir:             dir,
+		DataDir: dir,
 	})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -92,10 +89,7 @@ func TestShardWorkerBulkProcess(t *testing.T) {
 
 	dir := t.TempDir()
 	segMgr, err := segment.NewManager(segment.Config{
-		FlushThreshold:      1000,
-		MaxSegmentsPerLevel: 5,
-		LevelSizeMultiplier: 10,
-		DataDir:             dir,
+		DataDir: dir,
 	})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)

@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	indexes "plastic-engine-core/internal/core/cluster/indexes"
 	pebble "plastic-engine-core/internal/adapters/storage/pebble"
+	indexes "plastic-engine-core/internal/core/cluster/indexes"
 	"plastic-engine-core/internal/pkg/logger"
 )
 
@@ -276,6 +276,7 @@ func (w *IndexWriter) loadForward(documentID string) (forwardDocument, error) {
 		return forwardDocument{}, fmt.Errorf("load forward index: %w", err)
 	}
 
+	// REMOVE UNMARSHAL MASHAL SHIT TO DO
 	var doc forwardDocument
 	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
 		return forwardDocument{}, fmt.Errorf("decode forward index: %w", err)
@@ -364,7 +365,7 @@ func (w *IndexWriter) addTermToBatch(batch pebble.BatchStore, field, term, docum
 	}
 
 	// Write posting
-	postingData, err := json.Marshal(posting)
+	postingData, err := json.Marshal(posting) // Why the hell we had json Marshal here
 	if err != nil {
 		return fmt.Errorf("encode posting: %w", err)
 	}

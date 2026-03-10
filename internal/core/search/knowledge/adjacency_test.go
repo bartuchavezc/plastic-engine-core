@@ -1,8 +1,8 @@
 package knowledge
 
 import (
+	"fmt"
 	"testing"
-	"time"
 )
 
 func TestAdjacencyMatrixTermDF(t *testing.T) {
@@ -55,24 +55,22 @@ func TestAdjacencyMatrixEdges(t *testing.T) {
 	}
 	defer am.Close()
 
-	now := time.Now().Unix()
-
 	// Add edges
 	err = am.AddEdge("golang", "programming", EdgeData{
 		Weight:    0.8,
 		EdgeType:  "related",
-		CreatedAt: now,
-		Source:    "agent",
+		Generation: 0,
+		Source:     "agent",
 	})
 	if err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
 
 	err = am.AddEdge("golang", "concurrency", EdgeData{
-		Weight:    0.6,
-		EdgeType:  "feature",
-		CreatedAt: now,
-		Source:    "agent",
+		Weight:     0.6,
+		EdgeType:   "feature",
+		Generation: 0,
+		Source:     "agent",
 	})
 	if err != nil {
 		t.Fatalf("AddEdge: %v", err)
@@ -119,12 +117,10 @@ func TestAdjacencyMatrixSpread(t *testing.T) {
 	}
 	defer am.Close()
 
-	now := time.Now().Unix()
-
 	// Build a small graph: A → B → C, A → D
-	_ = am.AddEdge("A", "B", EdgeData{Weight: 0.9, CreatedAt: now})
-	_ = am.AddEdge("B", "C", EdgeData{Weight: 0.8, CreatedAt: now})
-	_ = am.AddEdge("A", "D", EdgeData{Weight: 0.5, CreatedAt: now})
+	_ = am.AddEdge("A", "B", EdgeData{Weight: 0.9})
+	_ = am.AddEdge("B", "C", EdgeData{Weight: 0.8})
+	_ = am.AddEdge("A", "D", EdgeData{Weight: 0.5})
 
 	// Spread from A with 2 hops, decay 0.7
 	result := am.Spread("A", 2, 0.7)
@@ -159,10 +155,8 @@ func TestAdjacencyMatrixDecay(t *testing.T) {
 	}
 	defer am.Close()
 
-	now := time.Now().Unix()
-
-	_ = am.AddEdge("A", "B", EdgeData{Weight: 1.0, CreatedAt: now})
-	_ = am.AddEdge("A", "C", EdgeData{Weight: 0.001, CreatedAt: now}) // Will be deleted after decay (0.001 * 0.5 = 0.0005 < 0.001)
+	_ = am.AddEdge("A", "B", EdgeData{Weight: 1.0})
+	_ = am.AddEdge("A", "C", EdgeData{Weight: 0.001}) // Will be deleted after decay (0.001 * 0.5 = 0.0005 < 0.001)
 
 	err = am.DecayEdges(0.5)
 	if err != nil {
@@ -245,5 +239,183 @@ func TestAdjacencyMatrixListTermsByPrefix(t *testing.T) {
 	entries = am.ListTermsByPrefix("title", "app", 1)
 	if len(entries) != 1 {
 		t.Errorf("expected 1 term with limit=1, got %d", len(entries))
+	}
+}
+
+func TestAdjacencyMatrixSpreadTopK(t *testing.T) {
+	dir := t.TempDir()
+	am, err := NewAdjacencyMatrix(AdjacencyMatrixConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("NewAdjacencyMatrix: %v", err)
+	}
+	defer am.Close()
+
+	// Build a fan-out graph: A → B1..B10
+	for i := 0; i < 10; i++ {
+		target := fmt.Sprintf("B%d", i)
+		weight := 1.0 - float64(i)*0.05 // B0=1.0, B1=0.95, ..., B9=0.55
+		_ = am.AddEdge("A", target, EdgeData{Weight: weight})
+	}
+
+	// SpreadTopK with maxFanOut=3: should get top 3 by weight (plus possible explore slot)
+	result := am.SpreadTopK("A", 1, 0.7, 3, 0.0)
+	if len(result) > 3 {
+		t.Errorf("expected at most 3 results with maxFanOut=3, got %d", len(result))
+	}
+
+	// B0 should always be present (highest weight)
+	if _, ok := result["B0"]; !ok {
+		t.Error("expected B0 (highest weight) in SpreadTopK result")
+	}
+
+	// With epsilon=0, results should be deterministic top-K
+	result2 := am.SpreadTopK("A", 1, 0.7, 3, 0.0)
+	if len(result2) != len(result) {
+		t.Errorf("expected deterministic results with epsilon=0, got %d vs %d", len(result), len(result2))
+	}
+
+	// Full fan-out should match Spread
+	resultFull := am.SpreadTopK("A", 1, 0.7, 100, 0.0)
+	resultSpread := am.Spread("A", 1, 0.7)
+	if len(resultFull) != len(resultSpread) {
+		t.Errorf("SpreadTopK with large maxFanOut should match Spread: %d vs %d", len(resultFull), len(resultSpread))
+	}
+}
+
+func TestSpreadActivationBasic(t *testing.T) {
+	dir := t.TempDir()
+	am, err := NewAdjacencyMatrix(AdjacencyMatrixConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("NewAdjacencyMatrix: %v", err)
+	}
+	defer am.Close()
+
+	// Graph: A → B → C, A → D
+	_ = am.AddEdge("A", "B", EdgeData{Weight: 0.9})
+	_ = am.AddEdge("B", "C", EdgeData{Weight: 0.8})
+	_ = am.AddEdge("A", "D", EdgeData{Weight: 0.5})
+
+	result := am.SpreadActivation("A", 1.0, 2, 0.7, 50, 0.0, 0.001)
+
+	// B: 1.0 * 0.9 * 0.7 = 0.63
+	if w, ok := result["B"]; !ok {
+		t.Error("expected B in result")
+	} else if w < 0.62 || w > 0.64 {
+		t.Errorf("expected B weight ~0.63, got %f", w)
+	}
+
+	// C: 0.63 * 0.8 * 0.7 = 0.3528
+	if w, ok := result["C"]; !ok {
+		t.Error("expected C in result")
+	} else if w < 0.35 || w > 0.36 {
+		t.Errorf("expected C weight ~0.353, got %f", w)
+	}
+
+	// D: 1.0 * 0.5 * 0.7 = 0.35
+	if w, ok := result["D"]; !ok {
+		t.Error("expected D in result")
+	} else if w < 0.34 || w > 0.36 {
+		t.Errorf("expected D weight ~0.35, got %f", w)
+	}
+
+	// startNode should not be in result
+	if _, ok := result["A"]; ok {
+		t.Error("startNode A should not be in result")
+	}
+}
+
+func TestSpreadActivationEnergyThreshold(t *testing.T) {
+	dir := t.TempDir()
+	am, err := NewAdjacencyMatrix(AdjacencyMatrixConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("NewAdjacencyMatrix: %v", err)
+	}
+	defer am.Close()
+
+	// Chain: A → B → C → D, all weights 0.5, decay 0.7
+	_ = am.AddEdge("A", "B", EdgeData{Weight: 0.5})
+	_ = am.AddEdge("B", "C", EdgeData{Weight: 0.5})
+	_ = am.AddEdge("C", "D", EdgeData{Weight: 0.5})
+
+	// threshold=0.15, entryEnergy=1.0, decay=0.7
+	// B: 1.0 * 0.5 * 0.7 = 0.35 → included
+	// C: 0.35 * 0.5 * 0.7 = 0.1225 → below 0.15, pruned
+	result := am.SpreadActivation("A", 1.0, 3, 0.7, 50, 0.0, 0.15)
+
+	if _, ok := result["B"]; !ok {
+		t.Error("expected B in result (energy 0.35 >= 0.15)")
+	}
+	if _, ok := result["C"]; ok {
+		t.Error("expected C to be pruned (energy 0.1225 < 0.15)")
+	}
+	if _, ok := result["D"]; ok {
+		t.Error("expected D to be pruned (unreachable when C is pruned)")
+	}
+}
+
+func TestSpreadActivationSelfLoop(t *testing.T) {
+	dir := t.TempDir()
+	am, err := NewAdjacencyMatrix(AdjacencyMatrixConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("NewAdjacencyMatrix: %v", err)
+	}
+	defer am.Close()
+
+	_ = am.AddEdge("A", "B", EdgeData{Weight: 0.9})
+	_ = am.AddEdge("B", "A", EdgeData{Weight: 0.8}) // back-edge to start
+
+	result := am.SpreadActivation("A", 1.0, 2, 0.7, 50, 0.0, 0.001)
+
+	if _, ok := result["A"]; ok {
+		t.Error("startNode should be excluded from results")
+	}
+	if _, ok := result["B"]; !ok {
+		t.Error("expected B in result")
+	}
+}
+
+func TestSpreadActivationEntryEnergy(t *testing.T) {
+	dir := t.TempDir()
+	am, err := NewAdjacencyMatrix(AdjacencyMatrixConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("NewAdjacencyMatrix: %v", err)
+	}
+	defer am.Close()
+
+	_ = am.AddEdge("A", "B", EdgeData{Weight: 0.9})
+	_ = am.AddEdge("A", "C", EdgeData{Weight: 0.6})
+
+	full := am.SpreadActivation("A", 1.0, 1, 0.7, 50, 0.0, 0.001)
+	half := am.SpreadActivation("A", 0.5, 1, 0.7, 50, 0.0, 0.001)
+
+	// Results should scale proportionally
+	for node, fullW := range full {
+		halfW, ok := half[node]
+		if !ok {
+			t.Errorf("expected node %s in half-energy result", node)
+			continue
+		}
+		ratio := halfW / fullW
+		if ratio < 0.49 || ratio > 0.51 {
+			t.Errorf("node %s: expected ratio ~0.5, got %f (full=%f, half=%f)", node, ratio, fullW, halfW)
+		}
+	}
+}
+
+func TestSelectTopKEpsilonSelfLoopFilter(t *testing.T) {
+	edges := []Edge{
+		{From: "A", To: "A", Data: EdgeData{Weight: 1.0}},
+		{From: "A", To: "B", Data: EdgeData{Weight: 0.9}},
+		{From: "A", To: "C", Data: EdgeData{Weight: 0.8}},
+	}
+
+	selected := selectTopKEpsilon(edges, "A", 10, 0.0)
+	for _, e := range selected {
+		if e.To == "A" {
+			t.Error("self-loop back to start node should be filtered out")
+		}
+	}
+	if len(selected) != 2 {
+		t.Errorf("expected 2 edges after filtering self-loop, got %d", len(selected))
 	}
 }

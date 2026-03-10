@@ -14,7 +14,7 @@ type NgramConfig struct {
 // DefaultNgramConfig returns the default n-gram configuration.
 func DefaultNgramConfig() NgramConfig {
 	return NgramConfig{
-		Enabled:   true,
+		Enabled:   false,
 		MinLength: 2,
 		MaxLength: 10,
 	}
@@ -130,4 +130,3 @@ const (
 	ErrNgramMaxLengthInvalid  NgramError = "ngram max_length must be >= min_length"
 	ErrNgramMaxLengthTooLarge NgramError = "ngram max_length cannot exceed 50"
 )
-

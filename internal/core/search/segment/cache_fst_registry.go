@@ -539,7 +539,7 @@ func (r *CacheFSTRegistry) ListTermsByFuzzy(ctx context.Context, field, query st
 		if f != field {
 			continue
 		}
-		if levenshteinDistance(query, t) <= maxDistance {
+		if DamerauLevenshteinDistance(query, t) <= maxDistance {
 			termID := formatTermID(counter)
 			entries = append(entries, TermEntry{
 				Field:  f,

@@ -2,8 +2,7 @@ package segment_test
 
 import (
 	"context"
-	"os"
-	"path/filepath"
+	"fmt"
 	"testing"
 
 	"plastic-engine-core/internal/core/search/segment"
@@ -13,10 +12,7 @@ func TestManagerBasicIndexAndSearch(t *testing.T) {
 	dir := t.TempDir()
 
 	config := segment.Config{
-		FlushThreshold:      100,
-		MaxSegmentsPerLevel: 5,
-		LevelSizeMultiplier: 10,
-		DataDir:             dir,
+		DataDir: dir,
 	}
 
 	mgr, err := segment.NewManager(config)
@@ -67,17 +63,10 @@ func TestManagerBasicIndexAndSearch(t *testing.T) {
 	}
 }
 
-func TestManagerFlush(t *testing.T) {
+func TestManagerBatchIndex(t *testing.T) {
 	dir := t.TempDir()
 
-	config := segment.Config{
-		FlushThreshold:      10, // Low threshold for testing
-		MaxSegmentsPerLevel: 5,
-		LevelSizeMultiplier: 10,
-		DataDir:             dir,
-	}
-
-	mgr, err := segment.NewManager(config)
+	mgr, err := segment.NewManager(segment.Config{DataDir: dir})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -85,59 +74,73 @@ func TestManagerFlush(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Index enough documents to trigger flush
-	for i := 0; i < 15; i++ {
-		docID := "doc" + string(rune('a'+i))
-		err = mgr.Index(ctx, "title", "term", docID, 1, nil)
-		if err != nil {
-			t.Fatalf("Index: %v", err)
-		}
+	docs := []segment.DocumentBatch{
+		{
+			DocID: "doc1",
+			FieldTerms: map[string][]segment.TermPosting{
+				"title": {
+					{Term: "hello", TF: 2, Positions: []int{1, 5}},
+					{Term: "world", TF: 1, Positions: []int{2}},
+				},
+			},
+		},
+		{
+			DocID: "doc2",
+			FieldTerms: map[string][]segment.TermPosting{
+				"title": {
+					{Term: "hello", TF: 1, Positions: []int{1}},
+					{Term: "foo", TF: 1, Positions: []int{2}},
+				},
+			},
+		},
 	}
 
-	// Force flush
-	mgr.Flush()
+	if err := mgr.IndexDocumentBatch(ctx, docs); err != nil {
+		t.Fatalf("IndexDocumentBatch: %v", err)
+	}
 
-	// Check that segment files were created
-	segmentDir := filepath.Join(dir, "segments")
-	entries, err := os.ReadDir(segmentDir)
+	// Search
+	hits, err := mgr.Search(ctx, "title", "hello")
 	if err != nil {
-		t.Fatalf("ReadDir: %v", err)
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Errorf("expected 2 hits for hello, got %d", len(hits))
 	}
 
-	hasSegment := false
-	for _, entry := range entries {
-		if filepath.Ext(entry.Name()) == ".seg" {
-			hasSegment = true
-			break
-		}
+	// Verify DF
+	df := mgr.GetDF("title\x00hello")
+	if df != 2 {
+		t.Errorf("expected DF=2 for hello, got %d", df)
 	}
 
-	if !hasSegment {
-		t.Error("expected at least one segment file after flush")
+	// Verify total docs
+	total := mgr.GetTotalDocs()
+	if total != 2 {
+		t.Errorf("expected 2 total docs, got %d", total)
 	}
 
-	// Search should still work
-	hits, err := mgr.Search(ctx, "title", "term")
+	// Verify positions using SearchWithPositions (Search returns TF-only)
+	posHits, err := mgr.SearchWithPositions(ctx, "title", "hello")
 	if err != nil {
-		t.Fatalf("Search after flush: %v", err)
+		t.Fatalf("SearchWithPositions: %v", err)
 	}
-
-	if len(hits) < 10 {
-		t.Errorf("expected at least 10 hits after flush, got %d", len(hits))
+	for _, hit := range posHits {
+		if hit.DocID == "doc1" {
+			if hit.TF != 2 {
+				t.Errorf("expected TF=2 for doc1, got %d", hit.TF)
+			}
+			if len(hit.Positions) != 2 {
+				t.Errorf("expected 2 positions for doc1, got %d", len(hit.Positions))
+			}
+		}
 	}
 }
 
-func TestManagerAlias(t *testing.T) {
+func TestManagerSearchByTermID(t *testing.T) {
 	dir := t.TempDir()
 
-	config := segment.Config{
-		FlushThreshold:      100,
-		MaxSegmentsPerLevel: 5,
-		LevelSizeMultiplier: 10,
-		DataDir:             dir,
-	}
-
-	mgr, err := segment.NewManager(config)
+	mgr, err := segment.NewManager(segment.Config{DataDir: dir})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -145,176 +148,139 @@ func TestManagerAlias(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Index with original term
 	err = mgr.Index(ctx, "title", "car", "doc1", 1, nil)
 	if err != nil {
 		t.Fatalf("Index: %v", err)
 	}
 
-	// Search with original term
-	hits, err := mgr.Search(ctx, "title", "car")
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-	if len(hits) != 1 {
-		t.Errorf("expected 1 hit for 'car', got %d", len(hits))
-	}
-
-	// With sovereign shards, the termID is deterministic: field\x00term.
-	// Aliases work by indexing the same document under a different term key.
-	// The registry-based CreateAlias is only available when a registry exists.
 	termID := "title\x00car"
 
-	// Verify GetDF works with deterministic key
-	df := mgr.GetDF(termID)
-	if df != 1 {
-		t.Errorf("expected DF=1 for 'title/car', got %d", df)
-	}
-
-	// Verify SearchByTermID with deterministic key
-	hits, err = mgr.SearchByTermID(termID)
+	hits, err := mgr.SearchByTermID(termID)
 	if err != nil {
 		t.Fatalf("SearchByTermID: %v", err)
 	}
 	if len(hits) != 1 {
-		t.Errorf("expected 1 hit via SearchByTermID, got %d", len(hits))
+		t.Errorf("expected 1 hit, got %d", len(hits))
 	}
 	if len(hits) > 0 && hits[0].DocID != "doc1" {
 		t.Errorf("expected doc1, got %s", hits[0].DocID)
 	}
-}
 
-func TestMemSegment(t *testing.T) {
-	seg := segment.NewMemSegment("test_seg")
-
-	// Add postings
-	seg.Add("term1", "doc1", 2, []int{0, 5})
-	seg.Add("term1", "doc2", 1, []int{0})
-	seg.Add("term2", "doc1", 1, []int{3})
-
-	// Check counts
-	if seg.DocCount() != 2 {
-		t.Errorf("expected 2 docs, got %d", seg.DocCount())
-	}
-
-	if seg.TermCount() != 2 {
-		t.Errorf("expected 2 terms, got %d", seg.TermCount())
-	}
-
-	// Search
-	hits := seg.Search("term1")
-	if len(hits) != 2 {
-		t.Errorf("expected 2 hits for term1, got %d", len(hits))
-	}
-
-	// Check DF
-	df := seg.GetLocalDF("term1")
-	if df != 2 {
-		t.Errorf("expected DF=2 for term1, got %d", df)
+	df := mgr.GetDF(termID)
+	if df != 1 {
+		t.Errorf("expected DF=1, got %d", df)
 	}
 }
 
-func TestDiskSegmentWriteAndRead(t *testing.T) {
+func TestManagerGetTermsWithPrefix(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create a memory segment
-	memSeg := segment.NewMemSegment("test_seg")
-	memSeg.Add("term1", "doc1", 2, []int{0, 5})
-	memSeg.Add("term1", "doc2", 1, []int{0})
-	memSeg.Add("term2", "doc1", 1, []int{3})
-
-	// Flush to disk
-	diskSeg, err := segment.FlushMemSegment(memSeg, dir)
+	mgr, err := segment.NewManager(segment.Config{DataDir: dir})
 	if err != nil {
-		t.Fatalf("FlushMemSegment: %v", err)
+		t.Fatalf("NewManager: %v", err)
 	}
-	defer diskSeg.Close()
-
-	// Verify metadata
-	if diskSeg.DocCount() != 2 {
-		t.Errorf("expected 2 docs, got %d", diskSeg.DocCount())
-	}
-
-	// Search
-	hits := diskSeg.Search("term1")
-	if len(hits) != 2 {
-		t.Errorf("expected 2 hits for term1, got %d", len(hits))
-	}
-
-	// Check DF
-	df := diskSeg.GetLocalDF("term1")
-	if df != 2 {
-		t.Errorf("expected DF=2 for term1, got %d", df)
-	}
-
-	// Reopen and verify
-	diskSeg2, err := segment.OpenDiskSegment(diskSeg.Path())
-	if err != nil {
-		t.Fatalf("OpenDiskSegment: %v", err)
-	}
-	defer diskSeg2.Close()
-
-	hits2 := diskSeg2.Search("term1")
-	if len(hits2) != 2 {
-		t.Errorf("after reopen: expected 2 hits, got %d", len(hits2))
-	}
-}
-
-func TestTermRegistry(t *testing.T) {
-	dir := t.TempDir()
-
-	reg, err := segment.NewFSTTermRegistry(segment.FSTRegistryConfig{
-		DataDir:          dir,
-		RebuildThreshold: 10000,
-		RebuildCooldown:  4,
-	})
-	if err != nil {
-		t.Fatalf("NewFSTTermRegistry: %v", err)
-	}
-	defer reg.Close()
+	defer mgr.Close()
 
 	ctx := context.Background()
 
-	// Create term
-	termID1, err := reg.GetOrCreate(ctx, "title", "hello")
+	mgr.Index(ctx, "title", "apple", "doc1", 1, []int{1})
+	mgr.Index(ctx, "title", "application", "doc2", 1, []int{1})
+	mgr.Index(ctx, "title", "banana", "doc3", 1, []int{1})
+
+	terms := mgr.GetTermsWithPrefix(ctx, "title", "app")
+	if len(terms) != 2 {
+		t.Errorf("expected 2 terms with prefix 'app', got %d: %v", len(terms), terms)
+	}
+}
+
+func TestManagerPersistence(t *testing.T) {
+	dir := t.TempDir()
+
+	// Index and close
+	mgr, err := segment.NewManager(segment.Config{DataDir: dir})
 	if err != nil {
-		t.Fatalf("GetOrCreate: %v", err)
+		t.Fatalf("NewManager: %v", err)
 	}
 
-	if termID1 == "" {
-		t.Error("expected non-empty term ID")
-	}
+	ctx := context.Background()
+	mgr.Index(ctx, "title", "hello", "doc1", 1, []int{1})
+	mgr.Close()
 
-	// Get same term again
-	termID2, err := reg.GetOrCreate(ctx, "title", "hello")
+	// Reopen and verify
+	mgr2, err := segment.NewManager(segment.Config{DataDir: dir})
 	if err != nil {
-		t.Fatalf("GetOrCreate second: %v", err)
+		t.Fatalf("NewManager reopen: %v", err)
 	}
+	defer mgr2.Close()
 
-	if termID1 != termID2 {
-		t.Errorf("expected same term ID, got %s != %s", termID1, termID2)
-	}
-
-	// Create alias
-	err = reg.CreateAlias("title", "hi", termID1)
+	hits, err := mgr2.Search(ctx, "title", "hello")
 	if err != nil {
-		t.Fatalf("CreateAlias: %v", err)
+		t.Fatalf("Search after reopen: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Errorf("expected 1 hit after reopen, got %d", len(hits))
 	}
 
-	// Lookup alias
-	aliasID, found := reg.Get(ctx, "title", "hi")
-	if !found {
-		t.Error("expected alias to be found")
+	total := mgr2.GetTotalDocs()
+	if total != 1 {
+		t.Errorf("expected 1 total doc after reopen, got %d", total)
 	}
-	if aliasID != termID1 {
-		t.Errorf("expected alias to point to %s, got %s", termID1, aliasID)
+}
+
+func TestManagerBulkIngest(t *testing.T) {
+	dir := t.TempDir()
+
+	mgr, err := segment.NewManager(segment.Config{DataDir: dir})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	defer mgr.Close()
+
+	ctx := context.Background()
+
+	// Index 1000 docs in batches
+	batchSize := 100
+	for batch := 0; batch < 10; batch++ {
+		docs := make([]segment.DocumentBatch, batchSize)
+		for i := 0; i < batchSize; i++ {
+			docID := fmt.Sprintf("doc_%d_%d", batch, i)
+			docs[i] = segment.DocumentBatch{
+				DocID: docID,
+				FieldTerms: map[string][]segment.TermPosting{
+					"title": {
+						{Term: "common", TF: 1, Positions: []int{1}},
+						{Term: fmt.Sprintf("unique_%d", batch*batchSize+i), TF: 1, Positions: []int{2}},
+					},
+				},
+			}
+		}
+		if err := mgr.IndexDocumentBatch(ctx, docs); err != nil {
+			t.Fatalf("batch %d: %v", batch, err)
+		}
 	}
 
-	// Test DF
-	reg.IncrementDF(termID1, 5)
-	df := reg.GetDF(termID1)
-	if df != 5 {
-		t.Errorf("expected DF=5, got %d", df)
+	// Verify total
+	total := mgr.GetTotalDocs()
+	if total != 1000 {
+		t.Errorf("expected 1000 total docs, got %d", total)
+	}
+
+	// Search common term
+	hits, err := mgr.Search(ctx, "title", "common")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 1000 {
+		t.Errorf("expected 1000 hits for 'common', got %d", len(hits))
+	}
+
+	// Search unique term
+	hits, err = mgr.Search(ctx, "title", "unique_42")
+	if err != nil {
+		t.Fatalf("Search unique: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Errorf("expected 1 hit for 'unique_42', got %d", len(hits))
 	}
 }
 
@@ -325,8 +291,8 @@ func TestBM25Scorer(t *testing.T) {
 		TotalDocs: 1000,
 		AvgDocLen: 100,
 		TermDF: map[string]int64{
-			"term1": 10,  // Rare term
-			"term2": 500, // Common term
+			"term1": 10,
+			"term2": 500,
 		},
 		DocLens: map[string]int{
 			"doc1": 100,
@@ -334,7 +300,6 @@ func TestBM25Scorer(t *testing.T) {
 		},
 	}
 
-	// Rare term should score higher than common term with same TF
 	scoreRare := scorer.Score(ctx, "term1", 1, 100)
 	scoreCommon := scorer.Score(ctx, "term2", 1, 100)
 
@@ -342,7 +307,6 @@ func TestBM25Scorer(t *testing.T) {
 		t.Errorf("rare term should score higher: rare=%f, common=%f", scoreRare, scoreCommon)
 	}
 
-	// Higher TF should score higher
 	scoreTF1 := scorer.Score(ctx, "term1", 1, 100)
 	scoreTF3 := scorer.Score(ctx, "term1", 3, 100)
 
@@ -350,7 +314,6 @@ func TestBM25Scorer(t *testing.T) {
 		t.Errorf("higher TF should score higher: TF1=%f, TF3=%f", scoreTF1, scoreTF3)
 	}
 
-	// Shorter docs should score higher (for same TF)
 	scoreShort := scorer.Score(ctx, "term1", 1, 50)
 	scoreLong := scorer.Score(ctx, "term1", 1, 200)
 
@@ -365,21 +328,17 @@ func TestBloomFilter(t *testing.T) {
 		FalsePositiveRate: 0.01,
 	})
 
-	// Add some items
 	items := []string{"term1", "term2", "term3", "hello", "world"}
 	for _, item := range items {
 		bloom.Add(item)
 	}
 
-	// Test that added items are found
 	for _, item := range items {
 		if !bloom.MayContain(item) {
 			t.Errorf("bloom filter should contain %s", item)
 		}
 	}
 
-	// Test that non-existent items are (mostly) not found
-	// Note: Some false positives are expected
 	notFound := 0
 	testItems := []string{"notexist1", "notexist2", "notexist3", "foo", "bar", "baz"}
 	for _, item := range testItems {
@@ -388,61 +347,47 @@ func TestBloomFilter(t *testing.T) {
 		}
 	}
 
-	// At least some should not be found (false positive rate is 1%)
 	if notFound == 0 {
 		t.Error("bloom filter has too many false positives")
 	}
 }
 
-func TestBloomFilterInDiskSegment(t *testing.T) {
+func TestPostingEncoding(t *testing.T) {
+	// Test binary encoding roundtrip via the posting store
 	dir := t.TempDir()
 
-	// Create a memory segment with terms
-	memSeg := segment.NewMemSegment("test_bloom_seg")
-	memSeg.Add("term_alpha", "doc1", 2, []int{0, 5})
-	memSeg.Add("term_beta", "doc2", 1, []int{0})
-	memSeg.Add("term_gamma", "doc1", 1, []int{3})
-
-	// Flush to disk (this creates bloom filter)
-	diskSeg, err := segment.FlushMemSegment(memSeg, dir)
+	mgr, err := segment.NewManager(segment.Config{DataDir: dir})
 	if err != nil {
-		t.Fatalf("FlushMemSegment: %v", err)
+		t.Fatalf("NewManager: %v", err)
 	}
-	defer diskSeg.Close()
+	defer mgr.Close()
 
-	// Search for existing terms - should find them
-	hits := diskSeg.Search("term_alpha")
-	if len(hits) == 0 {
-		t.Error("expected to find term_alpha")
-	}
+	ctx := context.Background()
 
-	hits = diskSeg.Search("term_beta")
-	if len(hits) == 0 {
-		t.Error("expected to find term_beta")
-	}
-
-	// Search for non-existent term - bloom filter should reject quickly
-	hits = diskSeg.Search("term_nonexistent")
-	if len(hits) != 0 {
-		t.Error("expected no hits for non-existent term")
-	}
-
-	// Reopen and verify bloom filter persisted
-	diskSeg2, err := segment.OpenDiskSegment(diskSeg.Path())
+	// Index with specific positions
+	err = mgr.Index(ctx, "body", "test", "doc1", 3, []int{1, 5, 10})
 	if err != nil {
-		t.Fatalf("OpenDiskSegment: %v", err)
-	}
-	defer diskSeg2.Close()
-
-	// Should still find existing terms
-	hits = diskSeg2.Search("term_alpha")
-	if len(hits) == 0 {
-		t.Error("after reopen: expected to find term_alpha")
+		t.Fatalf("Index: %v", err)
 	}
 
-	// Should still reject non-existent terms
-	hits = diskSeg2.Search("term_nonexistent")
-	if len(hits) != 0 {
-		t.Error("after reopen: expected no hits for non-existent term")
+	// Use SearchWithPositions to verify position roundtrip (Search returns TF-only)
+	hits, err := mgr.SearchWithPositions(ctx, "body", "test")
+	if err != nil {
+		t.Fatalf("SearchWithPositions: %v", err)
+	}
+
+	if len(hits) != 1 {
+		t.Fatalf("expected 1 hit, got %d", len(hits))
+	}
+
+	hit := hits[0]
+	if hit.TF != 3 {
+		t.Errorf("expected TF=3, got %d", hit.TF)
+	}
+	if len(hit.Positions) != 3 {
+		t.Errorf("expected 3 positions, got %d", len(hit.Positions))
+	}
+	if hit.Positions[0] != 1 || hit.Positions[1] != 5 || hit.Positions[2] != 10 {
+		t.Errorf("unexpected positions: %v", hit.Positions)
 	}
 }

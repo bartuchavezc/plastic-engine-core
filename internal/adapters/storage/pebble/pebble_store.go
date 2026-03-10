@@ -21,6 +21,7 @@ type KeyValue struct {
 // BatchStore provides batch operations for atomic writes.
 type BatchStore interface {
 	Set(key string, value string) error
+	SetBytes(key string, value []byte) error
 	Delete(key string) error
 	SetInt64(key string, value int64) error
 	SetFloat64(key string, value float64) error
@@ -46,9 +47,29 @@ type StoreConfig struct {
 	// Default 0 uses Pebble's default (4MB).
 	MemTableSize int
 
+	// MemTableStopWritesThreshold is the number of queued memtables before
+	// Pebble stalls writes. Default 0 uses Pebble's default (2).
+	// Higher values (e.g. 4) allow more memtables to queue for flush before
+	// blocking, smoothing out write throughput under sustained load.
+	MemTableStopWritesThreshold int
+
+	// L0CompactionThreshold is the number of L0 sub-levels that triggers compaction.
+	// Default 0 uses Pebble's default (4).
+	L0CompactionThreshold int
+
+	// L0StopWritesThreshold is the number of L0 sub-levels at which Pebble
+	// completely stalls writes. Default 0 uses Pebble's default (12).
+	// Increasing this (e.g. 20) gives compaction more headroom before stalling,
+	// trading higher read amplification for steadier write throughput.
+	L0StopWritesThreshold int
+
 	// DisableDiskHealthCheck disables Pebble's disk health monitoring goroutines.
 	// Default false. Set true to reduce goroutine count (one less per open file).
 	DisableDiskHealthCheck bool
+
+	// Cache is an optional shared block cache. nil = Pebble creates an 8MB default.
+	// The caller owns the lifecycle (Unref). PebbleStore will NOT close this cache.
+	Cache *pebbledb.Cache
 }
 
 // DefaultStoreConfig returns the default configuration optimized for indexing performance.
@@ -127,6 +148,21 @@ func NewPebbleStoreWithConfig(path string, cfg StoreConfig) (*PebbleStore, error
 	// Configure memtable size if specified
 	if cfg.MemTableSize > 0 {
 		opts.MemTableSize = uint64(cfg.MemTableSize)
+	}
+
+	// L0 write stall tuning: controls when Pebble throttles/blocks writes
+	if cfg.MemTableStopWritesThreshold > 0 {
+		opts.MemTableStopWritesThreshold = cfg.MemTableStopWritesThreshold
+	}
+	if cfg.L0CompactionThreshold > 0 {
+		opts.L0CompactionThreshold = cfg.L0CompactionThreshold
+	}
+	if cfg.L0StopWritesThreshold > 0 {
+		opts.L0StopWritesThreshold = cfg.L0StopWritesThreshold
+	}
+
+	if cfg.Cache != nil {
+		opts.Cache = cfg.Cache
 	}
 
 	db, err := pebbledb.Open(path, opts)
@@ -332,6 +368,84 @@ func (s *PebbleStore) PrefixScanLimit(prefix string, limit int) ([]KeyValue, err
 	return results, nil
 }
 
+// KeyValueBytes represents a key-value pair with raw byte values.
+type KeyValueBytes struct {
+	Key   []byte
+	Value []byte
+}
+
+// PrefixScanBytes returns all key-value pairs whose key starts with prefix,
+// with values as raw []byte (avoids string conversion for binary data).
+func (s *PebbleStore) PrefixScanBytes(prefix string) ([]KeyValueBytes, error) {
+	prefixBytes := []byte(prefix)
+	iter, err := s.db.NewIter(&pebbledb.IterOptions{
+		LowerBound: prefixBytes,
+		UpperBound: prefixUpperBound(prefixBytes),
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	var results []KeyValueBytes
+	for iter.First(); iter.Valid(); iter.Next() {
+		key := make([]byte, len(iter.Key()))
+		copy(key, iter.Key())
+		val := make([]byte, len(iter.Value()))
+		copy(val, iter.Value())
+		results = append(results, KeyValueBytes{Key: key, Value: val})
+	}
+	if err := iter.Error(); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+// PrefixIterBytes iterates over all key-value pairs matching prefix, calling fn
+// for each. If fn returns false, iteration stops early. Key and value slices
+// point to iterator-internal memory and are only valid for the duration of
+// the callback — callers must copy if they need to retain them.
+func (s *PebbleStore) PrefixIterBytes(prefix string, fn func(key, value []byte) bool) error {
+	prefixBytes := []byte(prefix)
+	iter, err := s.db.NewIter(&pebbledb.IterOptions{
+		LowerBound: prefixBytes,
+		UpperBound: prefixUpperBound(prefixBytes),
+	})
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+
+	for iter.First(); iter.Valid(); iter.Next() {
+		if !fn(iter.Key(), iter.Value()) {
+			break
+		}
+	}
+	return iter.Error()
+}
+
+// PrefixIterKeys iterates over all keys matching prefix, calling fn for each.
+// If fn returns false, iteration stops early. Keys passed to fn are only valid
+// for the duration of the callback (they point to iterator-internal memory).
+func (s *PebbleStore) PrefixIterKeys(prefix string, fn func(key []byte) bool) error {
+	prefixBytes := []byte(prefix)
+	iter, err := s.db.NewIter(&pebbledb.IterOptions{
+		LowerBound: prefixBytes,
+		UpperBound: prefixUpperBound(prefixBytes),
+	})
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+
+	for iter.First(); iter.Valid(); iter.Next() {
+		if !fn(iter.Key()) {
+			break
+		}
+	}
+	return iter.Error()
+}
+
 // prefixUpperBound computes the exclusive upper bound for a prefix scan.
 // It increments the last byte to form the upper bound.
 func prefixUpperBound(prefix []byte) []byte {
@@ -348,6 +462,46 @@ func prefixUpperBound(prefix []byte) []byte {
 	}
 	// All 0xFF bytes: no upper bound (scan to end)
 	return nil
+}
+
+// --------------------------------------------------------------------------
+// Bounded iterator (reusable across multiple prefix scans)
+// --------------------------------------------------------------------------
+
+// BoundedIterator wraps a Pebble iterator that can be repositioned with
+// SetBounds, avoiding the overhead of creating/destroying an iterator per scan.
+type BoundedIterator struct {
+	iter *pebbledb.Iterator
+}
+
+// NewBoundedIterator creates a reusable iterator over the full keyspace.
+// The caller must call Close when done.
+func (s *PebbleStore) NewBoundedIterator() (*BoundedIterator, error) {
+	iter, err := s.db.NewIter(nil)
+	if err != nil {
+		return nil, err
+	}
+	return &BoundedIterator{iter: iter}, nil
+}
+
+// ScanPrefix repositions the iterator to scan all keys matching prefix,
+// calling fn for each key-value pair. Key and value slices point to
+// iterator-internal memory and are only valid for the duration of the callback.
+// Return false from fn to stop early.
+func (bi *BoundedIterator) ScanPrefix(prefix []byte, fn func(key, value []byte) bool) error {
+	upper := prefixUpperBound(prefix)
+	bi.iter.SetBounds(prefix, upper)
+	for bi.iter.SeekGE(prefix); bi.iter.Valid(); bi.iter.Next() {
+		if !fn(bi.iter.Key(), bi.iter.Value()) {
+			break
+		}
+	}
+	return bi.iter.Error()
+}
+
+// Close releases the underlying Pebble iterator.
+func (bi *BoundedIterator) Close() error {
+	return bi.iter.Close()
 }
 
 // --------------------------------------------------------------------------

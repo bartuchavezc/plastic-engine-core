@@ -17,6 +17,7 @@ func NewMerger() *Merger {
 func (m *Merger) Merge(results []ShardResult, limit int) Response {
 	// Count total and collect all hits
 	var totalHits int64
+	var metadata map[string]any
 	allHits := make([]Hit, 0)
 
 	for _, result := range results {
@@ -25,12 +26,16 @@ func (m *Merger) Merge(results []ShardResult, limit int) Response {
 		}
 		totalHits += result.Total
 		allHits = append(allHits, result.Hits...)
+		if metadata == nil && result.Metadata != nil {
+			metadata = result.Metadata
+		}
 	}
 
 	if len(allHits) == 0 {
 		return Response{
-			Hits:  []Hit{},
-			Total: totalHits,
+			Hits:     []Hit{},
+			Total:    totalHits,
+			Metadata: metadata,
 		}
 	}
 
@@ -38,8 +43,9 @@ func (m *Merger) Merge(results []ShardResult, limit int) Response {
 	topK := m.selectTopK(allHits, limit)
 
 	return Response{
-		Hits:  topK,
-		Total: totalHits,
+		Hits:     topK,
+		Total:    totalHits,
+		Metadata: metadata,
 	}
 }
 

@@ -42,6 +42,7 @@ type Clause struct {
 	Match  *MatchQuery  `json:"match,omitempty"`
 	Range  *RangeQuery  `json:"range,omitempty"`
 	Prefix *PrefixQuery `json:"prefix,omitempty"`
+	Hybrid *HybridQuery `json:"hybrid,omitempty"`
 }
 
 // TermQuery matches documents whose field exactly equals the provided value.
@@ -52,9 +53,10 @@ type TermQuery struct {
 
 // MatchQuery performs analyzer/tokenizer processing and scoring on the field.
 type MatchQuery struct {
-	Field string  `json:"field"`
-	Value string  `json:"value"`
-	Boost float64 `json:"boost,omitempty"`
+	Field     string  `json:"field"`
+	Value     string  `json:"value"`
+	Boost     float64 `json:"boost,omitempty"`
+	Fuzziness int     `json:"fuzziness,omitempty"` // 0 = disabled, 1-2 = max DL edit distance for zero-hit tokens
 }
 
 // RangeQuery constraints the field to a value window.
@@ -72,6 +74,22 @@ type PrefixQuery struct {
 	Field string  `json:"field"`
 	Value string  `json:"value"`
 	Boost float64 `json:"boost,omitempty"`
+}
+
+// HybridQuery performs BM25 scoring on original tokens plus graph-expanded
+// terms from the term co-occurrence matrix via SpreadTopK.
+type HybridQuery struct {
+	Field        string  `json:"field"`
+	Value        string  `json:"value"`
+	Boost        float64 `json:"boost,omitempty"`
+	Hops         int     `json:"hops,omitempty"`
+	Decay        float64 `json:"decay,omitempty"`
+	MaxFanOut    int     `json:"max_fan_out,omitempty"`
+	Epsilon      float64 `json:"epsilon,omitempty"`
+	Fuzziness    int     `json:"fuzziness,omitempty"` // 0 = disabled, 1-2 = max DL edit distance for zero-hit tokens
+	ExpansionCap    float64 `json:"expansion_cap,omitempty"`    // max boost multiplier for expanded terms (default 0.3)
+	MaxDF           int64   `json:"max_df,omitempty"`           // skip expanded terms with DF above this threshold (default 5000)
+	EnergyThreshold float64 `json:"energy_threshold,omitempty"` // minimum energy to explore a node during spread activation (default 0.01)
 }
 
 // Normalize prepares the request by trimming whitespace, applying defaults and
@@ -178,6 +196,15 @@ func (c *Clause) normalize(allowMatch bool) error {
 		}
 		return c.Prefix.normalize()
 	}
+	if c.Hybrid != nil {
+		if !allowMatch {
+			return &ValidationError{
+				Field:   "clause.hybrid",
+				Message: "hybrid operator is not allowed in this context",
+			}
+		}
+		return c.Hybrid.normalize()
+	}
 
 	return nil
 }
@@ -218,6 +245,14 @@ func (c Clause) validate(allowMatch bool, fieldPrefix string) error {
 			}
 		}
 		return c.Prefix.validate(fieldPrefix + ".prefix")
+	case c.Hybrid != nil:
+		if !allowMatch {
+			return &ValidationError{
+				Field:   fieldPrefix + ".hybrid",
+				Message: "hybrid operator is not allowed here",
+			}
+		}
+		return c.Hybrid.validate(fieldPrefix + ".hybrid")
 	default:
 		// Should be unreachable because populated() already guards this, but keep defensive.
 		return &ValidationError{
@@ -239,6 +274,9 @@ func (c Clause) populated() int {
 		count++
 	}
 	if c.Prefix != nil {
+		count++
+	}
+	if c.Hybrid != nil {
 		count++
 	}
 	return count
@@ -428,6 +466,77 @@ func (p PrefixQuery) validate(fieldPrefix string) error {
 		return &ValidationError{
 			Field:   fieldPrefix + ".boost",
 			Message: "boost must be greater than zero",
+		}
+	}
+	return nil
+}
+
+func (h *HybridQuery) normalize() error {
+	field, boost, err := parseBoostedField(h.Field)
+	if err != nil {
+		return err
+	}
+	h.Field = field
+
+	h.Value = strings.TrimSpace(h.Value)
+	if h.Boost <= 0 {
+		if boost > 0 {
+			h.Boost = boost
+		} else {
+			h.Boost = 1
+		}
+	} else if boost > 0 {
+		h.Boost *= boost
+	}
+
+	if h.Hops <= 0 {
+		h.Hops = 1
+	}
+	if h.Decay <= 0 {
+		h.Decay = 0.7
+	}
+	if h.MaxFanOut <= 0 {
+		h.MaxFanOut = 15
+	}
+	if h.Epsilon <= 0 {
+		h.Epsilon = 0.05
+	}
+	if h.ExpansionCap <= 0 {
+		h.ExpansionCap = 0.3
+	}
+	if h.MaxDF <= 0 {
+		h.MaxDF = 5000
+	}
+	if h.EnergyThreshold <= 0 {
+		h.EnergyThreshold = 0.01
+	}
+
+	return nil
+}
+
+func (h HybridQuery) validate(fieldPrefix string) error {
+	if h.Field == "" {
+		return &ValidationError{
+			Field:   fieldPrefix + ".field",
+			Message: "field is required",
+		}
+	}
+	if h.Value == "" {
+		return &ValidationError{
+			Field:   fieldPrefix + ".value",
+			Message: "value is required",
+		}
+	}
+	if h.Boost <= 0 {
+		return &ValidationError{
+			Field:   fieldPrefix + ".boost",
+			Message: "boost must be greater than zero",
+		}
+	}
+	if h.Hops < 1 || h.Hops > 3 {
+		return &ValidationError{
+			Field:   fieldPrefix + ".hops",
+			Message: "hops must be between 1 and 3",
 		}
 	}
 	return nil

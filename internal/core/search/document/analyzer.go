@@ -14,10 +14,19 @@ type Analyzer interface {
 type AnalyzerFactory struct{}
 
 // NewAnalyzer builds an analyzer by identifier.
+// Supported: "standard" (lowercase + stop words + stemming), "simple" (lowercase only).
+// Names may include a language suffix: "standard.spanish", "standard.english".
+// Empty name defaults to "standard".
 func (f AnalyzerFactory) NewAnalyzer(name string) (Analyzer, error) {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "", "simple", "standard":
-		// "standard" maps to simple for now; can be replaced with a proper standard analyzer later
+	name = strings.ToLower(strings.TrimSpace(name))
+
+	// Check for language suffix: "standard.spanish" → base="standard", lang="spanish"
+	base, lang, _ := strings.Cut(name, ".")
+
+	switch base {
+	case "", "standard":
+		return NewStandardAnalyzer(lang), nil
+	case "simple":
 		return SimpleAnalyzer{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported analyzer %q", name)

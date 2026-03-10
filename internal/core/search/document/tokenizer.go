@@ -7,10 +7,11 @@ import (
 
 // Token represents the output of tokenization/analyzing a field value.
 type Token struct {
-	Term      string
-	Position  int
-	StartByte int
-	EndByte   int
+	Term       string
+	Position   int
+	StartByte  int
+	EndByte    int
+	SentenceID int // 0-indexed sentence boundary, assigned by tokenizer
 }
 
 // Tokenizer splits raw text into tokens.
@@ -24,8 +25,9 @@ type TokenizerFactory struct{}
 // NewTokenizer builds a tokenizer by identifier.
 func (f TokenizerFactory) NewTokenizer(name string) (Tokenizer, error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "", "whitespace", "standard":
-		// "standard" maps to whitespace for now; can be replaced with a proper standard tokenizer later
+	case "", "standard":
+		return StandardTokenizer{}, nil // UAX#29 Unicode Text Segmentation
+	case "whitespace":
 		return WhitespaceTokenizer{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported tokenizer %q", name)

@@ -71,13 +71,15 @@ func (w *SegmentIndexWriter) Index(ctx context.Context, req DocumentWriteRequest
 				// Term already seen - update in place
 				postings[idx].TF++
 				postings[idx].Positions = append(postings[idx].Positions, token.Position)
+				postings[idx].SentenceIDs = append(postings[idx].SentenceIDs, token.SentenceID)
 			} else {
 				// New term - add to slice and index
 				termIndex[token.Term] = len(postings)
 				postings = append(postings, segment.TermPosting{
-					Term:      token.Term,
-					TF:        1,
-					Positions: []int{token.Position}, // pre-allocate with first position
+					Term:        token.Term,
+					TF:          1,
+					Positions:   []int{token.Position},
+					SentenceIDs: []int{token.SentenceID},
 				})
 			}
 		}
@@ -109,10 +111,11 @@ func (w *SegmentIndexWriter) IndexBatch(ctx context.Context, requests []Document
 		return nil
 	}
 
-	// Process in chunks to bound memory
+	// Process in chunks to bound memory (adaptive under heap pressure)
 	indexed := 0
-	for start := 0; start < len(requests); start += indexBatchChunkSize {
-		end := start + indexBatchChunkSize
+	chunkSize := w.segmentMgr.EffectiveBatchSize(indexBatchChunkSize)
+	for start := 0; start < len(requests); start += chunkSize {
+		end := start + chunkSize
 		if end > len(requests) {
 			end = len(requests)
 		}
@@ -176,12 +179,14 @@ func (w *SegmentIndexWriter) prepareDocumentBatch(requests []DocumentWriteReques
 				if idx, exists := termIndex[token.Term]; exists {
 					postings[idx].TF++
 					postings[idx].Positions = append(postings[idx].Positions, token.Position)
+					postings[idx].SentenceIDs = append(postings[idx].SentenceIDs, token.SentenceID)
 				} else {
 					termIndex[token.Term] = len(postings)
 					postings = append(postings, segment.TermPosting{
-						Term:      token.Term,
-						TF:        1,
-						Positions: []int{token.Position},
+						Term:        token.Term,
+						TF:          1,
+						Positions:   []int{token.Position},
+						SentenceIDs: []int{token.SentenceID},
 					})
 				}
 			}

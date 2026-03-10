@@ -50,5 +50,5 @@ type TermInfo struct {
 	AliasOf   string    `json:"alias_of,omitempty"` // Original term if this is an alias
 }
 
-// Compile-time check that FSTTermRegistry implements TermRegistry
-var _ TermRegistry = (*FSTTermRegistry)(nil)
+// Compile-time check that PebbleTermRegistry implements TermRegistry
+var _ TermRegistry = (*PebbleTermRegistry)(nil)

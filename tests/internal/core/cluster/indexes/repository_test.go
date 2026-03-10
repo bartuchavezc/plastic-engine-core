@@ -29,11 +29,9 @@ func TestRepositoryCreateAndGetIndex(t *testing.T) {
 				Indexed:  true,
 			},
 			{
-				Name:      "description",
-				Type:      indexes.FieldTypeText,
-				Analyzer:  "simple",
-				Tokenizer: "whitespace",
-				Indexed:   true,
+				Name:    "description",
+				Type:    indexes.FieldTypeText,
+				Indexed: true,
 			},
 			{
 				Name:     "created_at",

@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"plastic-engine-core/internal/core/search/document"
 	"plastic-engine-core/internal/core/search/knowledge"
@@ -677,10 +676,10 @@ func handleKnowledgeEdges(w http.ResponseWriter, r *http.Request, store Knowledg
 			req.Weight = 1.0
 		}
 		err := graph.AddEdge(req.NodeA, req.NodeB, knowledge.EdgeData{
-			Weight:    req.Weight,
-			EdgeType:  req.EdgeType,
-			CreatedAt: time.Now().Unix(),
-			Source:    req.Source,
+			Weight:     req.Weight,
+			EdgeType:   req.EdgeType,
+			Generation: 0,
+			Source:     req.Source,
 		})
 		if err != nil {
 			http.Error(w, "failed to add edge: "+err.Error(), http.StatusInternalServerError)

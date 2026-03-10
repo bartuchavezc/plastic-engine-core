@@ -107,3 +107,40 @@ Este documento lista las mejoras pendientes organizadas por prioridad.
 - [ ] `docs/SEARCH.md` - Arquitectura de nodos de búsqueda
 - [ ] `docs/API.md` - Referencia completa de la API
 
+```mermaid
+graph TD
+    %% Entidades principales
+    Doc[Documento Crudo]
+    SW[Shard Worker / Orquestador]
+    Tok[Tokenizer / Analyzer]
+    CoOcc[Co-occurrence Accumulator]
+    Batch[Pebble Batch]
+    Pebble[(Pebble DB)]
+
+    %% Flujo de trabajo
+    Doc --> SW
+    
+    subgraph "Etapa de Preparación (Paralela)"
+        SW --> Tok
+    end
+
+    Tok -- "1. Posting Lists" --> SW
+    Tok -- "2. Raw Pairs" --> SW
+
+    subgraph "Etapa de Enriquecimiento"
+        SW -- "Envía Pairs" --> CoOcc
+        CoOcc -- "Retorna Datos Enriquecidos" --> SW
+    end
+
+    subgraph "Etapa de Escritura (Única)"
+        SW -- "Crea Batch" --> Batch
+        SW -- "1. Write Postings" --> Batch
+        SW -- "2. Write Co-occurrences" --> Batch
+        Batch -- "Commit Atómico" --> Pebble
+    end
+
+    %% Estilo
+    style Batch fill:#f96,stroke:#333,stroke-width:2px
+    style SW fill:#69f,stroke:#333,stroke-width:2px
+    style Pebble fill:#9f9,stroke:#333,stroke-width:2px
+```

@@ -569,7 +569,7 @@ func (r *PebbleTermRegistry) ListTermsByFuzzy(_ context.Context, field, query st
 			continue
 		}
 		term := kv.Key[fieldPfxLen:]
-		if levenshteinDistance(query, term) <= maxDistance {
+		if DamerauLevenshteinDistance(query, term) <= maxDistance {
 			termID := kv.Value
 			entries = append(entries, TermEntry{
 				Field:  field,

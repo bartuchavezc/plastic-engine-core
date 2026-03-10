@@ -11,17 +11,19 @@ import (
 
 // ShardResult encapsulates the result from a single shard query.
 type ShardResult struct {
-	ShardID string
-	Hits    []Hit
-	Total   int64
-	Error   error
+	ShardID  string
+	Hits     []Hit
+	Total    int64
+	Error    error
+	Metadata map[string]any
 }
 
 // Response is the aggregated search response.
 type Response struct {
-	Hits   []Hit  `json:"hits"`
-	Total  int64  `json:"total"`
-	Cursor string `json:"cursor,omitempty"`
+	Hits     []Hit          `json:"hits"`
+	Total    int64          `json:"total"`
+	Cursor   string         `json:"cursor,omitempty"`
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // ShardStoreGetter provides access to shard stores by ID (legacy Pebble-based).
@@ -35,6 +37,7 @@ type SegmentManagerGetter func(shardID string) (SegmentManager, bool)
 type SearchService struct {
 	getShardStore     ShardStoreGetter    // Legacy Pebble-based (will be nil after migration)
 	getSegmentManager SegmentManagerGetter // Segment-based
+	queryAnalyzer     QueryAnalyzer        // Shared query analyzer (tokenize+stem+stopwords)
 	log               logger.Logger
 }
 
@@ -50,12 +53,14 @@ func NewSearchService(getter ShardStoreGetter, log logger.Logger) *SearchService
 }
 
 // NewSegmentSearchService creates a new search service using segment-based storage.
-func NewSegmentSearchService(getter SegmentManagerGetter, log logger.Logger) *SearchService {
+// analyzer may be nil — in that case queries use basic whitespace tokenization.
+func NewSegmentSearchService(getter SegmentManagerGetter, analyzer QueryAnalyzer, log logger.Logger) *SearchService {
 	if log == nil {
 		log = logger.DefaultLogger()
 	}
 	return &SearchService{
 		getSegmentManager: getter,
+		queryAnalyzer:     analyzer,
 		log:               log,
 	}
 }
@@ -96,6 +101,8 @@ func detectQueryType(clause Clause) string {
 		return "prefix"
 	case clause.Range != nil:
 		return "range"
+	case clause.Hybrid != nil:
+		return "hybrid"
 	default:
 		return "unknown"
 	}
@@ -148,14 +155,18 @@ func (s *SearchService) executeOnShard(ctx context.Context, shardID string, req 
 	if s.getSegmentManager != nil {
 		segMgr, ok := s.getSegmentManager(shardID)
 		if ok {
-			executor := NewSegmentExecutor(shardID, segMgr)
+			executor := NewSegmentExecutor(shardID, segMgr, s.queryAnalyzer)
 			hits, total, err := executor.Execute(ctx, req)
-			return ShardResult{
+			result := ShardResult{
 				ShardID: shardID,
 				Hits:    hits,
 				Total:   total,
 				Error:   err,
 			}
+			if executor.hybridMetadata != nil {
+				result.Metadata = map[string]any{"hybrid_expansion": executor.hybridMetadata}
+			}
+			return result
 		}
 	}
 
