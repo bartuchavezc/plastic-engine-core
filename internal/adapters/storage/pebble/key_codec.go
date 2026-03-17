@@ -10,7 +10,6 @@ import (
 const (
 	PrefixTermRegistry = "term:"
 	PrefixInverted     = "inv:"
-	PrefixNgram        = "ngram:"
 	PrefixForward      = "fwd:"
 	PrefixMeta         = "meta:"
 )
@@ -89,47 +88,6 @@ func ParseInvertedKey(key string) (termID, docID string, ok bool) {
 		return "", "", false
 	}
 	return rest[:idx], rest[idx+1:], true
-}
-
-// --------------------------------------------------------------------------
-// N-gram keys (for prefix search)
-// --------------------------------------------------------------------------
-
-// NgramKey builds a key for an n-gram entry: ngram:{field}:{prefix}:{term_id}
-func NgramKey(field, prefix, termID string) string {
-	return PrefixNgram + field + ":" + prefix + ":" + termID
-}
-
-// NgramPrefix returns the prefix for scanning n-grams: ngram:{field}:{prefix}:
-func NgramPrefix(field, prefix string) string {
-	return PrefixNgram + field + ":" + prefix + ":"
-}
-
-// ParseNgramKey extracts field, prefix, and termID from an n-gram key.
-// Returns empty strings and false if the key is malformed.
-func ParseNgramKey(key string) (field, prefix, termID string, ok bool) {
-	if !strings.HasPrefix(key, PrefixNgram) {
-		return "", "", "", false
-	}
-	rest := key[len(PrefixNgram):]
-	
-	// Find first colon (after field)
-	idx1 := strings.Index(rest, ":")
-	if idx1 < 0 {
-		return "", "", "", false
-	}
-	field = rest[:idx1]
-	rest = rest[idx1+1:]
-	
-	// Find second colon (after prefix)
-	idx2 := strings.Index(rest, ":")
-	if idx2 < 0 {
-		return "", "", "", false
-	}
-	prefix = rest[:idx2]
-	termID = rest[idx2+1:]
-	
-	return field, prefix, termID, true
 }
 
 // --------------------------------------------------------------------------

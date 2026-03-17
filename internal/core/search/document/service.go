@@ -27,16 +27,12 @@ type WorkItem struct {
 	Command Command
 }
 
-// WriterFactory creates a DocumentIndexWriter for a shard.
-type WriterFactory func(shard *shards.Shard) DocumentIndexWriter
-
 type Service struct {
-	shards        *shards.Manager
-	assignments   *AssignmentProvider
-	planner       *FieldPlanner
-	writerFactory WriterFactory
-	config        ShardWorkerConfig
-	log           logger.Logger
+	shards      *shards.Manager
+	assignments *AssignmentProvider
+	planner     *FieldPlanner
+	config      ShardWorkerConfig
+	log         logger.Logger
 
 	mu      sync.RWMutex
 	workers map[string]*ShardWorker
@@ -47,18 +43,17 @@ var (
 	ErrInvalidCommand = errors.New("invalid index command")
 )
 
-func NewService(shards *shards.Manager, assignments *AssignmentProvider, planner *FieldPlanner, writerFactory WriterFactory, cfg ShardWorkerConfig, log logger.Logger) *Service {
+func NewService(shards *shards.Manager, assignments *AssignmentProvider, planner *FieldPlanner, cfg ShardWorkerConfig, log logger.Logger) *Service {
 	if log == nil {
 		log = logger.DefaultLogger()
 	}
 	return &Service{
-		shards:        shards,
-		assignments:   assignments,
-		planner:       planner,
-		writerFactory: writerFactory,
-		config:        cfg,
-		log:           log,
-		workers:       make(map[string]*ShardWorker),
+		shards:      shards,
+		assignments: assignments,
+		planner:     planner,
+		config:      cfg,
+		log:         log,
+		workers:     make(map[string]*ShardWorker),
 	}
 }
 
@@ -140,8 +135,6 @@ func (s *Service) IndexBulk(ctx context.Context, cmds []Command) []error {
 	}
 
 	// Process shards in parallel — each shard's worker.Process is independent.
-	// Previously shards were processed sequentially, serializing work that
-	// could overlap (tokenization on shard A while shard B flushes to segment).
 	var wg sync.WaitGroup
 	var mu sync.Mutex // protects errs slice
 	for shardID, group := range groups {
@@ -222,21 +215,12 @@ func (s *Service) ensureWorker(shardID string) (*ShardWorker, error) {
 	}
 	s.mu.RUnlock()
 
-	if s.writerFactory == nil {
-		return nil, fmt.Errorf("writer factory not configured")
-	}
-
 	shard, ok := s.shards.GetShard(shardID)
 	if !ok {
 		return nil, ErrShardNotLoaded
 	}
 
-	writer := s.writerFactory(shard)
-	if writer == nil {
-		return nil, fmt.Errorf("writer factory returned nil for shard %s", shardID)
-	}
-
-	worker := NewShardWorker(shardID, shard, s.config, s.planner, writer, s.assignments, s.log)
+	worker := NewShardWorker(shardID, shard, s.config, s.planner, shard.Segments, s.assignments, s.log)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

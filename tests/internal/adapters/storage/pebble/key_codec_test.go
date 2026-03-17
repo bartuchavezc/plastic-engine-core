@@ -132,52 +132,6 @@ func TestParseInvertedKey(t *testing.T) {
 	}
 }
 
-func TestNgramKey(t *testing.T) {
-	t.Parallel()
-
-	key := pebble.NgramKey("title", "hel", "t_abc123")
-	want := "ngram:title:hel:t_abc123"
-	if key != want {
-		t.Errorf("NgramKey = %q, want %q", key, want)
-	}
-
-	prefix := pebble.NgramPrefix("title", "hel")
-	wantPrefix := "ngram:title:hel:"
-	if prefix != wantPrefix {
-		t.Errorf("NgramPrefix = %q, want %q", prefix, wantPrefix)
-	}
-}
-
-func TestParseNgramKey(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		key        string
-		wantField  string
-		wantPrefix string
-		wantTermID string
-		wantOK     bool
-	}{
-		{"ngram:title:hel:t_abc123", "title", "hel", "t_abc123", true},
-		{"ngram:body:wo:t_xyz", "body", "wo", "t_xyz", true},
-		{"inv:something", "", "", "", false},
-		{"ngram:field", "", "", "", false},
-		{"ngram:field:prefix", "", "", "", false},
-	}
-
-	for _, tt := range tests {
-		field, prefix, termID, ok := pebble.ParseNgramKey(tt.key)
-		if ok != tt.wantOK {
-			t.Errorf("ParseNgramKey(%q) ok = %v, want %v", tt.key, ok, tt.wantOK)
-			continue
-		}
-		if ok && (field != tt.wantField || prefix != tt.wantPrefix || termID != tt.wantTermID) {
-			t.Errorf("ParseNgramKey(%q) = (%q, %q, %q), want (%q, %q, %q)",
-				tt.key, field, prefix, termID, tt.wantField, tt.wantPrefix, tt.wantTermID)
-		}
-	}
-}
-
 func TestForwardKey(t *testing.T) {
 	t.Parallel()
 

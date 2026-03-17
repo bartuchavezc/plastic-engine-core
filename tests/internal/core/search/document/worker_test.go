@@ -6,7 +6,7 @@ import (
 
 	indexes "plastic-engine-core/internal/core/cluster/indexes"
 	"plastic-engine-core/internal/core/search/document"
-	"plastic-engine-core/internal/core/search/segment"
+	"plastic-engine-core/internal/core/search/indexstore"
 	shards "plastic-engine-core/internal/core/search/shards"
 	"plastic-engine-core/internal/pkg/logger"
 )
@@ -15,15 +15,13 @@ func TestShardWorkerProcessesDocument(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	segMgr, err := segment.NewManager(segment.Config{
+	segMgr, err := indexstore.NewManager(indexstore.Config{
 		DataDir: dir,
 	})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
 	defer segMgr.Close()
-
-	writer := document.NewSegmentIndexWriter(segMgr, nil)
 
 	registry := &stubShardRegistry{
 		shards: map[string]*shards.Shard{
@@ -56,7 +54,7 @@ func TestShardWorkerProcessesDocument(t *testing.T) {
 		registry.shards["shard-1"],
 		document.ShardWorkerConfig{MaxWorkers: 1},
 		planner,
-		writer,
+		segMgr,
 		provider,
 		logger.DefaultLogger(),
 	)
@@ -88,15 +86,13 @@ func TestShardWorkerBulkProcess(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	segMgr, err := segment.NewManager(segment.Config{
+	segMgr, err := indexstore.NewManager(indexstore.Config{
 		DataDir: dir,
 	})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
 	defer segMgr.Close()
-
-	writer := document.NewSegmentIndexWriter(segMgr, nil)
 
 	registry := &stubShardRegistry{
 		shards: map[string]*shards.Shard{
@@ -128,7 +124,7 @@ func TestShardWorkerBulkProcess(t *testing.T) {
 		registry.shards["shard-1"],
 		document.ShardWorkerConfig{MaxWorkers: 2},
 		planner,
-		writer,
+		segMgr,
 		provider,
 		logger.DefaultLogger(),
 	)

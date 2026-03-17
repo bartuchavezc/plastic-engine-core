@@ -145,13 +145,16 @@ func stopWordsFor(language string) []string {
 	}
 }
 
-// englishStopWords — Elasticsearch/Lucene default English stop words.
+// englishStopWords — Elasticsearch/Lucene default English stop words (_english_).
 var englishStopWords = []string{
 	"a", "an", "and", "are", "as", "at", "be", "but", "by",
-	"for", "if", "in", "into", "is", "it", "its",
-	"no", "not", "of", "on", "or", "such",
-	"that", "the", "their", "then", "there", "these",
-	"they", "this", "to", "was", "will", "with",
+	"do", "for", "from", "had", "has", "have", "he", "her",
+	"him", "his", "how", "i", "if", "in", "into", "is", "it", "its",
+	"me", "my", "no", "not", "of", "on", "or", "our",
+	"she", "so", "some", "such",
+	"that", "the", "their", "them", "then", "there", "these",
+	"they", "this", "to", "us", "was", "we", "what", "when",
+	"which", "who", "will", "with", "you", "your",
 }
 
 // spanishStopWords — Elasticsearch/Lucene default Spanish stop words.

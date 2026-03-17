@@ -13,15 +13,15 @@ import (
 	"plastic-engine-core/internal/core/cluster"
 	"plastic-engine-core/internal/core/cluster/indexes"
 	"plastic-engine-core/internal/core/cluster/nodes"
-	"plastic-engine-core/internal/core/search/segment"
+	"plastic-engine-core/internal/core/search/indexstore"
 )
 
 func TestTermLookupEndpointBasic(t *testing.T) {
 	t.Parallel()
 
 	// Mock search node that responds to /terms requests
-	termResponses := make(chan []segment.TermEntry, 1)
-	termResponses <- []segment.TermEntry{
+	termResponses := make(chan []indexstore.TermEntry, 1)
+	termResponses <- []indexstore.TermEntry{
 		{Field: "title", Term: "hello", TermID: "t1", DF: 5},
 		{Field: "title", Term: "world", TermID: "t2", DF: 3},
 	}
@@ -40,7 +40,7 @@ func TestTermLookupEndpointBasic(t *testing.T) {
 
 		terms := <-termResponses
 		resp := struct {
-			Terms []segment.TermEntry `json:"terms"`
+			Terms []indexstore.TermEntry `json:"terms"`
 			Total int64               `json:"total"`
 			Limit int                 `json:"limit"`
 		}{
@@ -111,7 +111,7 @@ func TestTermLookupEndpointBasic(t *testing.T) {
 	}
 
 	var resp struct {
-		Terms      []segment.TermEntry `json:"terms"`
+		Terms      []indexstore.TermEntry `json:"terms"`
 		Total      int64               `json:"total"`
 		ShardCount int                 `json:"shard_count"`
 	}
@@ -172,11 +172,11 @@ func TestTermLookupEndpointWithPrefixSearch(t *testing.T) {
 		lastPrefix = r.URL.Query().Get("prefix")
 
 		resp := struct {
-			Terms []segment.TermEntry `json:"terms"`
+			Terms []indexstore.TermEntry `json:"terms"`
 			Total int64               `json:"total"`
 			Limit int                 `json:"limit"`
 		}{
-			Terms: []segment.TermEntry{
+			Terms: []indexstore.TermEntry{
 				{Field: "title", Term: "hello", TermID: "t1", DF: 5},
 			},
 			Total: 1,
@@ -254,11 +254,11 @@ func TestTermLookupEndpointWithFuzzySearch(t *testing.T) {
 		lastDistance = r.URL.Query().Get("distance")
 
 		resp := struct {
-			Terms []segment.TermEntry `json:"terms"`
+			Terms []indexstore.TermEntry `json:"terms"`
 			Total int64               `json:"total"`
 			Limit int                 `json:"limit"`
 		}{
-			Terms: []segment.TermEntry{
+			Terms: []indexstore.TermEntry{
 				{Field: "title", Term: "hello", TermID: "t1", DF: 5},
 			},
 			Total: 1,
@@ -339,11 +339,11 @@ func TestTermLookupEndpointWithDateBasedShardFiltering(t *testing.T) {
 		requestedShards[shardID] = true
 
 		resp := struct {
-			Terms []segment.TermEntry `json:"terms"`
+			Terms []indexstore.TermEntry `json:"terms"`
 			Total int64               `json:"total"`
 			Limit int                 `json:"limit"`
 		}{
-			Terms: []segment.TermEntry{
+			Terms: []indexstore.TermEntry{
 				{Field: "timestamp", Term: "2024-01-15", TermID: "t1", DF: 10},
 			},
 			Total: 1,
@@ -413,7 +413,7 @@ func TestTermLookupEndpointWithDateBasedShardFiltering(t *testing.T) {
 	}
 
 	var resp struct {
-		Terms      []segment.TermEntry `json:"terms"`
+		Terms      []indexstore.TermEntry `json:"terms"`
 		Total      int64               `json:"total"`
 		ShardCount int                 `json:"shard_count"`
 	}
@@ -444,11 +444,11 @@ func TestTermLookupMergesResultsFromMultipleShards(t *testing.T) {
 		requestCount++
 		// Return same term with different DF from each "shard"
 		resp := struct {
-			Terms []segment.TermEntry `json:"terms"`
+			Terms []indexstore.TermEntry `json:"terms"`
 			Total int64               `json:"total"`
 			Limit int                 `json:"limit"`
 		}{
-			Terms: []segment.TermEntry{
+			Terms: []indexstore.TermEntry{
 				{Field: "title", Term: "common", TermID: "t1", DF: 10},
 			},
 			Total: 1,
@@ -511,7 +511,7 @@ func TestTermLookupMergesResultsFromMultipleShards(t *testing.T) {
 	}
 
 	var resp struct {
-		Terms      []segment.TermEntry `json:"terms"`
+		Terms      []indexstore.TermEntry `json:"terms"`
 		Total      int64               `json:"total"`
 		ShardCount int                 `json:"shard_count"`
 	}
@@ -572,7 +572,7 @@ func TestTermLookupEndpointEmptyIndex(t *testing.T) {
 	}
 
 	var resp struct {
-		Terms      []segment.TermEntry `json:"terms"`
+		Terms      []indexstore.TermEntry `json:"terms"`
 		Total      int64               `json:"total"`
 		ShardCount int                 `json:"shard_count"`
 	}

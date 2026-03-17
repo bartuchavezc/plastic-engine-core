@@ -120,6 +120,48 @@ func (s *BM25Scorer) tfNorm(tf, docLen int, avgDocLen float64) float64 {
 }
 
 // --------------------------------------------------------------------------
+// Coordinate Matching + Position Ordering
+// --------------------------------------------------------------------------
+
+// DefaultCoordWeight controls the exponent for coordinate matching.
+// Higher values penalize partial matches more aggressively.
+const DefaultCoordWeight = 2.0
+
+// CoordFactor returns a penalty/boost based on how many query terms matched.
+// For single-term queries it returns 1.0 (no effect).
+// For multi-term queries: ratio^DefaultCoordWeight, so a doc matching 2/4 terms
+// gets 0.25 while 4/4 gets 1.0.
+func CoordFactor(matchedTerms, totalTerms int) float64 {
+	if totalTerms <= 1 {
+		return 1.0
+	}
+	ratio := float64(matchedTerms) / float64(totalTerms)
+	return math.Pow(ratio, DefaultCoordWeight)
+}
+
+// OrderingBonusFactor controls the maximum bonus for terms appearing in query order.
+const OrderingBonusFactor = 0.5
+
+// OrderingBoost calculates a proximity-aware bonus for query terms appearing in
+// document order. For each consecutive pair, 1/gap gives full credit only to
+// adjacent terms (gap=1→1.0, gap=2→0.5, gap=5→0.2). Out-of-order pairs score 0.
+func OrderingBoost(queryTermPositions []int) float64 {
+	if len(queryTermPositions) <= 1 {
+		return 1.0
+	}
+	var pairScore float64
+	totalPairs := len(queryTermPositions) - 1
+	for i := 1; i < len(queryTermPositions); i++ {
+		if queryTermPositions[i] > queryTermPositions[i-1] {
+			gap := queryTermPositions[i] - queryTermPositions[i-1]
+			pairScore += 1.0 / float64(gap)
+		}
+	}
+	ratio := pairScore / float64(totalPairs)
+	return 1.0 + OrderingBonusFactor*ratio
+}
+
+// --------------------------------------------------------------------------
 // Utility functions for building scoring context
 // --------------------------------------------------------------------------
 

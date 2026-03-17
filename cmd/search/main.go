@@ -131,15 +131,12 @@ func main() {
 
 	assignmentProvider := document.NewAssignmentProvider(manager, resolver)
 	planner := document.NewFieldPlanner(document.TokenizerFactory{}, document.AnalyzerFactory{})
-	writerFactory := func(sh *shards.Shard) document.DocumentIndexWriter {
-		return document.NewSegmentIndexWriter(sh.Segments, log)
-	}
 
 	workerCfg := document.ShardWorkerConfig{
 		// MaxWorkers: 0 → applyDefaults() uses TuneForNode(cpus/2, [2,32])
 	}
 
-	indexService := document.NewService(manager, assignmentProvider, planner, writerFactory, workerCfg, log)
+	indexService := document.NewService(manager, assignmentProvider, planner, workerCfg, log)
 	defer indexService.Close()
 
 	// Create search service with segment manager getter
@@ -151,7 +148,7 @@ func main() {
 		return shard.Segments, true
 	}
 	queryAnalyzer := searchquery.NewStandardQueryAnalyzer("english")
-	searchService := searchquery.NewSegmentSearchService(getSegmentManager, queryAnalyzer, log)
+	searchService := searchquery.NewSearchService(getSegmentManager, queryAnalyzer, log)
 
 	// Create term lookup service for term index APIs
 	termLookupService := searchquery.NewTermLookupService(manager, log)

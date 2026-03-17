@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"plastic-engine-core/internal/core/search/segment"
+	"plastic-engine-core/internal/core/search/indexstore"
 	"plastic-engine-core/internal/core/search/shards"
 	"plastic-engine-core/internal/pkg/logger"
 )
@@ -32,7 +32,7 @@ func NewTermLookupService(shards ShardGetter, log logger.Logger) *TermLookupServ
 }
 
 // ListTerms returns all terms for a shard, optionally filtered by field.
-func (s *TermLookupService) ListTerms(ctx context.Context, shardID, field string, limit, offset int) ([]segment.TermEntry, int64, error) {
+func (s *TermLookupService) ListTerms(ctx context.Context, shardID, field string, limit, offset int) ([]indexstore.TermEntry, int64, error) {
 	shard, ok := s.shards.GetShard(shardID)
 	if !ok {
 		return nil, 0, fmt.Errorf("shard %s not found", shardID)
@@ -46,7 +46,7 @@ func (s *TermLookupService) ListTerms(ctx context.Context, shardID, field string
 }
 
 // ListTermsByPrefix returns terms matching a prefix.
-func (s *TermLookupService) ListTermsByPrefix(ctx context.Context, shardID, field, prefix string, limit int) ([]segment.TermEntry, error) {
+func (s *TermLookupService) ListTermsByPrefix(ctx context.Context, shardID, field, prefix string, limit int) ([]indexstore.TermEntry, error) {
 	shard, ok := s.shards.GetShard(shardID)
 	if !ok {
 		return nil, fmt.Errorf("shard %s not found", shardID)
@@ -60,7 +60,7 @@ func (s *TermLookupService) ListTermsByPrefix(ctx context.Context, shardID, fiel
 }
 
 // ListTermsByFuzzy returns terms within Levenshtein distance.
-func (s *TermLookupService) ListTermsByFuzzy(ctx context.Context, shardID, field, query string, maxDistance, limit int) ([]segment.TermEntry, error) {
+func (s *TermLookupService) ListTermsByFuzzy(ctx context.Context, shardID, field, query string, maxDistance, limit int) ([]indexstore.TermEntry, error) {
 	shard, ok := s.shards.GetShard(shardID)
 	if !ok {
 		return nil, fmt.Errorf("shard %s not found", shardID)
@@ -74,7 +74,7 @@ func (s *TermLookupService) ListTermsByFuzzy(ctx context.Context, shardID, field
 }
 
 // ListTermsByRegex returns terms matching a regex pattern.
-func (s *TermLookupService) ListTermsByRegex(ctx context.Context, shardID, field, pattern string, limit int) ([]segment.TermEntry, error) {
+func (s *TermLookupService) ListTermsByRegex(ctx context.Context, shardID, field, pattern string, limit int) ([]indexstore.TermEntry, error) {
 	shard, ok := s.shards.GetShard(shardID)
 	if !ok {
 		return nil, fmt.Errorf("shard %s not found", shardID)

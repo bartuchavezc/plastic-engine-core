@@ -2,18 +2,18 @@ package main
 
 import (
 	"fmt"
-	"plastic-engine-core/internal/core/search/segment"
+	"plastic-engine-core/internal/core/search/shards"
 )
 
 func main() {
-	profiles := []segment.NodeResourceProfile{
+	profiles := []shards.NodeResourceProfile{
 		{MemoryLimitMB: 2048, CPUCount: 2, ShardCount: 4},
 		{MemoryLimitMB: 8192, CPUCount: 8, ShardCount: 4},
 		{MemoryLimitMB: 32768, CPUCount: 32, ShardCount: 8},
 		{MemoryLimitMB: 131072, CPUCount: 132, ShardCount: 8},
 	}
 	for _, p := range profiles {
-		c := segment.TuneForNode(p)
+		c := shards.TuneForNode(p)
 		fmt.Printf("--- %dGB / %d CPUs / %d shards ---\n", p.MemoryLimitMB/1024, p.CPUCount, p.ShardCount)
 		fmt.Printf("  PebbleMemTableSize        : %d MB\n", c.PebbleMemTableSize/(1024*1024))
 		fmt.Printf("  MaxBatchSize              : %d docs\n", c.WorkerMaxBatchSize)

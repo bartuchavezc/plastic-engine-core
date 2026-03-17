@@ -11,7 +11,7 @@ import (
 	"plastic-engine-core/internal/core/search/document"
 	"plastic-engine-core/internal/core/search/knowledge"
 	searchquery "plastic-engine-core/internal/core/search/query"
-	"plastic-engine-core/internal/core/search/segment"
+	"plastic-engine-core/internal/core/search/indexstore"
 	"plastic-engine-core/internal/core/search/shards"
 	"plastic-engine-core/internal/pkg/logger"
 )
@@ -36,13 +36,13 @@ type ShardSyncer interface {
 // TermLookup provides term lookup operations for a shard.
 type TermLookup interface {
 	// ListTerms returns all terms for a shard, optionally filtered by field.
-	ListTerms(ctx context.Context, shardID, field string, limit, offset int) ([]segment.TermEntry, int64, error)
+	ListTerms(ctx context.Context, shardID, field string, limit, offset int) ([]indexstore.TermEntry, int64, error)
 	// ListTermsByPrefix returns terms matching a prefix.
-	ListTermsByPrefix(ctx context.Context, shardID, field, prefix string, limit int) ([]segment.TermEntry, error)
+	ListTermsByPrefix(ctx context.Context, shardID, field, prefix string, limit int) ([]indexstore.TermEntry, error)
 	// ListTermsByFuzzy returns terms within Levenshtein distance.
-	ListTermsByFuzzy(ctx context.Context, shardID, field, query string, maxDistance, limit int) ([]segment.TermEntry, error)
+	ListTermsByFuzzy(ctx context.Context, shardID, field, query string, maxDistance, limit int) ([]indexstore.TermEntry, error)
 	// ListTermsByRegex returns terms matching a regex pattern.
-	ListTermsByRegex(ctx context.Context, shardID, field, pattern string, limit int) ([]segment.TermEntry, error)
+	ListTermsByRegex(ctx context.Context, shardID, field, pattern string, limit int) ([]indexstore.TermEntry, error)
 }
 
 // KnowledgeStore manages named knowledge graphs (Type B indices).
@@ -432,7 +432,7 @@ func handleIndexDeleted(w http.ResponseWriter, r *http.Request, syncer ShardSync
 
 // termLookupResponse is the response for term lookup APIs.
 type termLookupResponse struct {
-	Terms  []segment.TermEntry `json:"terms"`
+	Terms  []indexstore.TermEntry `json:"terms"`
 	Total  int64               `json:"total,omitempty"`
 	Limit  int                 `json:"limit"`
 	Offset int                 `json:"offset,omitempty"`
@@ -502,7 +502,7 @@ func handleTermLookup(w http.ResponseWriter, r *http.Request, lookup TermLookup,
 	}
 
 	ctx := r.Context()
-	var terms []segment.TermEntry
+	var terms []indexstore.TermEntry
 	var total int64
 	var err error
 

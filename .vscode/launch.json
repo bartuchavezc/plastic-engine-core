@@ -1,0 +1,27 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Plastic Search Node",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}/cmd/search",
+            "env": {
+                // 1. Apagar OpenTelemetry para evitar el spam de errores
+                "OTEL_TRACES_EXPORTER": "none",
+                "OTEL_SDK_DISABLED": "true",
+                
+                // 2. Hardcodear los límites para que Autotune no de 0
+                "GOMAXPROCS": "4",
+                "GOMEMLIMIT": "4096MiB",
+                
+                // Si tu autotune lee variables custom, agregalas acá. Ej:
+                "PLASTIC_CPUS": "4",
+                "PLASTIC_MEM": "4096",
+                "PLASTIC_SHARDS": "2"
+            },
+            "args": [] // Si cmd/search necesita algún flag como --config, va acá
+        }
+    ]
+}

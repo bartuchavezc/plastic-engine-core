@@ -9,6 +9,13 @@ import (
 	"plastic-engine-core/internal/pkg/logger"
 )
 
+// Hit represents a matched document with its score.
+type Hit struct {
+	DocID   string  `json:"doc_id"`
+	ShardID string  `json:"shard_id"`
+	Score   float64 `json:"score"`
+}
+
 // ShardResult encapsulates the result from a single shard query.
 type ShardResult struct {
 	ShardID  string
@@ -26,35 +33,20 @@ type Response struct {
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
-// ShardStoreGetter provides access to shard stores by ID (legacy Pebble-based).
-type ShardStoreGetter func(shardID string) (ShardStore, bool)
-
 // SegmentManagerGetter provides access to segment managers by shard ID.
 type SegmentManagerGetter func(shardID string) (SegmentManager, bool)
 
 // SearchService coordinates search across multiple shards.
 // It assumes shard routing has been resolved externally.
 type SearchService struct {
-	getShardStore     ShardStoreGetter    // Legacy Pebble-based (will be nil after migration)
-	getSegmentManager SegmentManagerGetter // Segment-based
-	queryAnalyzer     QueryAnalyzer        // Shared query analyzer (tokenize+stem+stopwords)
+	getSegmentManager SegmentManagerGetter
+	queryAnalyzer     QueryAnalyzer // Shared query analyzer (tokenize+stem+stopwords)
 	log               logger.Logger
 }
 
-// NewSearchService creates a new search service (legacy Pebble-based).
-func NewSearchService(getter ShardStoreGetter, log logger.Logger) *SearchService {
-	if log == nil {
-		log = logger.DefaultLogger()
-	}
-	return &SearchService{
-		getShardStore: getter,
-		log:           log,
-	}
-}
-
-// NewSegmentSearchService creates a new search service using segment-based storage.
+// NewSearchService creates a new search service using segment-based storage.
 // analyzer may be nil — in that case queries use basic whitespace tokenization.
-func NewSegmentSearchService(getter SegmentManagerGetter, analyzer QueryAnalyzer, log logger.Logger) *SearchService {
+func NewSearchService(getter SegmentManagerGetter, analyzer QueryAnalyzer, log logger.Logger) *SearchService {
 	if log == nil {
 		log = logger.DefaultLogger()
 	}
@@ -151,44 +143,26 @@ func (s *SearchService) executeParallel(ctx context.Context, shardIDs []string, 
 }
 
 func (s *SearchService) executeOnShard(ctx context.Context, shardID string, req Request) ShardResult {
-	// Try segment-based storage first
-	if s.getSegmentManager != nil {
-		segMgr, ok := s.getSegmentManager(shardID)
-		if ok {
-			executor := NewSegmentExecutor(shardID, segMgr, s.queryAnalyzer)
-			hits, total, err := executor.Execute(ctx, req)
-			result := ShardResult{
-				ShardID: shardID,
-				Hits:    hits,
-				Total:   total,
-				Error:   err,
-			}
-			if executor.hybridMetadata != nil {
-				result.Metadata = map[string]any{"hybrid_expansion": executor.hybridMetadata}
-			}
-			return result
+	segMgr, ok := s.getSegmentManager(shardID)
+	if !ok {
+		return ShardResult{
+			ShardID: shardID,
+			Error:   ErrShardNotFound,
 		}
 	}
 
-	// Fall back to legacy Pebble-based storage
-	if s.getShardStore != nil {
-		store, ok := s.getShardStore(shardID)
-		if ok {
-			executor := NewExecutor(shardID, store)
-			hits, total, err := executor.Execute(ctx, req)
-			return ShardResult{
-				ShardID: shardID,
-				Hits:    hits,
-				Total:   total,
-				Error:   err,
-			}
-		}
-	}
-
-	return ShardResult{
+	executor := NewSegmentExecutor(shardID, segMgr, s.queryAnalyzer)
+	hits, total, err := executor.Execute(ctx, req)
+	result := ShardResult{
 		ShardID: shardID,
-		Error:   ErrShardNotFound,
+		Hits:    hits,
+		Total:   total,
+		Error:   err,
 	}
+	if executor.hybridMetadata != nil {
+		result.Metadata = map[string]any{"hybrid_expansion": executor.hybridMetadata}
+	}
+	return result
 }
 
 func (s *SearchService) mergeResults(results []ShardResult, limit int) Response {

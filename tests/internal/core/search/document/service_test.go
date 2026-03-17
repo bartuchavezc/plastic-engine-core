@@ -7,7 +7,7 @@ import (
 
 	indexes "plastic-engine-core/internal/core/cluster/indexes"
 	"plastic-engine-core/internal/core/search/document"
-	"plastic-engine-core/internal/core/search/segment"
+	"plastic-engine-core/internal/core/search/indexstore"
 	shards "plastic-engine-core/internal/core/search/shards"
 	"plastic-engine-core/internal/pkg/logger"
 )
@@ -77,7 +77,7 @@ func TestServiceIndexMissingShard(t *testing.T) {
 	}
 }
 
-func newTestService(t *testing.T) (*document.Service, *segment.Manager) {
+func newTestService(t *testing.T) (*document.Service, *indexstore.Manager) {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -109,15 +109,11 @@ func newTestService(t *testing.T) (*document.Service, *segment.Manager) {
 	provider := document.NewAssignmentProvider(manager, resolver)
 	planner := document.NewFieldPlanner(document.TokenizerFactory{}, document.AnalyzerFactory{})
 
-	writerFactory := func(s *shards.Shard) document.DocumentIndexWriter {
-		return document.NewSegmentIndexWriter(s.Segments, nil)
-	}
-
 	cfg := document.ShardWorkerConfig{
 		MaxWorkers: 1,
 	}
 
-	service := document.NewService(manager, provider, planner, writerFactory, cfg, logger.DefaultLogger())
+	service := document.NewService(manager, provider, planner, cfg, logger.DefaultLogger())
 	t.Cleanup(service.Close)
 	t.Cleanup(func() { manager.Close() })
 

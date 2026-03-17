@@ -10,7 +10,7 @@ import (
 
 	searchhttp "plastic-engine-core/internal/adapters/http/search"
 	"plastic-engine-core/internal/core/search/document"
-	"plastic-engine-core/internal/core/search/segment"
+	"plastic-engine-core/internal/core/search/indexstore"
 	"plastic-engine-core/internal/pkg/logger"
 )
 
@@ -85,7 +85,7 @@ func TestTermLookupEndpoint(t *testing.T) {
 	t.Parallel()
 
 	lookup := &stubTermLookup{
-		terms: []segment.TermEntry{
+		terms: []indexstore.TermEntry{
 			{Field: "title", Term: "hello", TermID: "t1", DF: 5},
 			{Field: "title", Term: "help", TermID: "t2", DF: 3},
 			{Field: "title", Term: "helicopter", TermID: "t3", DF: 1},
@@ -110,7 +110,7 @@ func TestTermLookupEndpoint(t *testing.T) {
 	}
 
 	var resp struct {
-		Terms []segment.TermEntry `json:"terms"`
+		Terms []indexstore.TermEntry `json:"terms"`
 		Total int64               `json:"total"`
 	}
 	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
@@ -129,7 +129,7 @@ func TestTermLookupPrefixEndpoint(t *testing.T) {
 	t.Parallel()
 
 	lookup := &stubTermLookup{
-		terms: []segment.TermEntry{
+		terms: []indexstore.TermEntry{
 			{Field: "title", Term: "hello", TermID: "t1", DF: 5},
 			{Field: "title", Term: "help", TermID: "t2", DF: 3},
 		},
@@ -159,7 +159,7 @@ func TestTermLookupFuzzyEndpoint(t *testing.T) {
 	t.Parallel()
 
 	lookup := &stubTermLookup{
-		terms: []segment.TermEntry{
+		terms: []indexstore.TermEntry{
 			{Field: "title", Term: "hello", TermID: "t1", DF: 5},
 		},
 	}
@@ -191,7 +191,7 @@ func TestTermLookupRegexEndpoint(t *testing.T) {
 	t.Parallel()
 
 	lookup := &stubTermLookup{
-		terms: []segment.TermEntry{
+		terms: []indexstore.TermEntry{
 			{Field: "title", Term: "hello", TermID: "t1", DF: 5},
 		},
 	}
@@ -236,7 +236,7 @@ func TestTermLookupRequiresShardID(t *testing.T) {
 }
 
 type stubTermLookup struct {
-	terms        []segment.TermEntry
+	terms        []indexstore.TermEntry
 	total        int64
 	lastPrefix   string
 	lastFuzzy    string
@@ -244,22 +244,22 @@ type stubTermLookup struct {
 	lastRegex    string
 }
 
-func (s *stubTermLookup) ListTerms(ctx context.Context, shardID, field string, limit, offset int) ([]segment.TermEntry, int64, error) {
+func (s *stubTermLookup) ListTerms(ctx context.Context, shardID, field string, limit, offset int) ([]indexstore.TermEntry, int64, error) {
 	return s.terms, s.total, nil
 }
 
-func (s *stubTermLookup) ListTermsByPrefix(ctx context.Context, shardID, field, prefix string, limit int) ([]segment.TermEntry, error) {
+func (s *stubTermLookup) ListTermsByPrefix(ctx context.Context, shardID, field, prefix string, limit int) ([]indexstore.TermEntry, error) {
 	s.lastPrefix = prefix
 	return s.terms, nil
 }
 
-func (s *stubTermLookup) ListTermsByFuzzy(ctx context.Context, shardID, field, query string, maxDistance, limit int) ([]segment.TermEntry, error) {
+func (s *stubTermLookup) ListTermsByFuzzy(ctx context.Context, shardID, field, query string, maxDistance, limit int) ([]indexstore.TermEntry, error) {
 	s.lastFuzzy = query
 	s.lastDistance = maxDistance
 	return s.terms, nil
 }
 
-func (s *stubTermLookup) ListTermsByRegex(ctx context.Context, shardID, field, pattern string, limit int) ([]segment.TermEntry, error) {
+func (s *stubTermLookup) ListTermsByRegex(ctx context.Context, shardID, field, pattern string, limit int) ([]indexstore.TermEntry, error) {
 	s.lastRegex = pattern
 	return s.terms, nil
 }

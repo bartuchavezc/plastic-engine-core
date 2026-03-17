@@ -21,7 +21,7 @@ import (
 	indexes "plastic-engine-core/internal/core/cluster/indexes"
 	"plastic-engine-core/internal/core/cluster/shards"
 	searchquery "plastic-engine-core/internal/core/search/query"
-	"plastic-engine-core/internal/core/search/segment"
+	"plastic-engine-core/internal/core/search/indexstore"
 )
 
 var tracer = otel.Tracer("cluster/http/search")
@@ -256,7 +256,7 @@ type termLookupRequest struct {
 
 // termLookupResponse is the aggregated response from term lookup.
 type termLookupResponse struct {
-	Terms      []segment.TermEntry `json:"terms"`
+	Terms      []indexstore.TermEntry `json:"terms"`
 	Total      int64               `json:"total"`
 	Limit      int                 `json:"limit"`
 	Offset     int                 `json:"offset,omitempty"`
@@ -359,7 +359,7 @@ func (h *handler) handleTermLookup(w http.ResponseWriter, r *http.Request) {
 
 	if len(allShards) == 0 {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(termLookupResponse{Terms: []segment.TermEntry{}, Total: 0, ShardCount: 0})
+		json.NewEncoder(w).Encode(termLookupResponse{Terms: []indexstore.TermEntry{}, Total: 0, ShardCount: 0})
 		return
 	}
 
@@ -483,13 +483,13 @@ func (h *handler) executeDistributedTermLookup(ctx context.Context, nodeRequests
 
 // termNodeResponse is the response from a single node's term lookup.
 type termNodeResponse struct {
-	Terms []segment.TermEntry
+	Terms []indexstore.TermEntry
 	Total int64
 }
 
 // termLookupSingleNode executes term lookup on a single node.
 func (h *handler) termLookupSingleNode(ctx context.Context, nodeAddr string, shardIDs []string, req termLookupRequest) (termNodeResponse, error) {
-	var allTerms []segment.TermEntry
+	var allTerms []indexstore.TermEntry
 	var totalCount int64
 
 	// Query each shard on this node
@@ -506,7 +506,7 @@ func (h *handler) termLookupSingleNode(ctx context.Context, nodeAddr string, sha
 }
 
 // termLookupSingleShard executes term lookup on a single shard via HTTP.
-func (h *handler) termLookupSingleShard(ctx context.Context, nodeAddr, shardID string, req termLookupRequest) ([]segment.TermEntry, int64, error) {
+func (h *handler) termLookupSingleShard(ctx context.Context, nodeAddr, shardID string, req termLookupRequest) ([]indexstore.TermEntry, int64, error) {
 	// Build query string
 	url := fmt.Sprintf("http://%s/terms?shard_id=%s&limit=%d",
 		strings.TrimPrefix(nodeAddr, "http://"),
@@ -547,7 +547,7 @@ func (h *handler) termLookupSingleShard(ctx context.Context, nodeAddr, shardID s
 	}
 
 	var result struct {
-		Terms  []segment.TermEntry `json:"terms"`
+		Terms  []indexstore.TermEntry `json:"terms"`
 		Total  int64               `json:"total"`
 		Limit  int                 `json:"limit"`
 		Offset int                 `json:"offset"`
@@ -562,7 +562,7 @@ func (h *handler) termLookupSingleShard(ctx context.Context, nodeAddr, shardID s
 // mergeTermResults merges and deduplicates term results from multiple shards.
 func (h *handler) mergeTermResults(results []termNodeResponse, limit int, shardCount int) termLookupResponse {
 	// Use map to deduplicate by field+term
-	termMap := make(map[string]segment.TermEntry)
+	termMap := make(map[string]indexstore.TermEntry)
 	var totalDF int64
 
 	for _, result := range results {
@@ -580,7 +580,7 @@ func (h *handler) mergeTermResults(results []termNodeResponse, limit int, shardC
 	}
 
 	// Convert map to slice
-	terms := make([]segment.TermEntry, 0, len(termMap))
+	terms := make([]indexstore.TermEntry, 0, len(termMap))
 	for _, entry := range termMap {
 		terms = append(terms, entry)
 	}

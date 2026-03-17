@@ -43,6 +43,17 @@ type Clause struct {
 	Range  *RangeQuery  `json:"range,omitempty"`
 	Prefix *PrefixQuery `json:"prefix,omitempty"`
 	Hybrid *HybridQuery `json:"hybrid,omitempty"`
+	Bool   *BoolQuery   `json:"bool,omitempty"`
+}
+
+// BoolQuery combines sub-clauses with Boolean logic (like Elasticsearch).
+// Should: at least one must match (OR), scores are summed.
+// Must: all must match (AND), scores are summed.
+// MustNot: exclude matching docs (filter, no scoring).
+type BoolQuery struct {
+	Should  []Clause `json:"should,omitempty"`
+	Must    []Clause `json:"must,omitempty"`
+	MustNot []Clause `json:"must_not,omitempty"`
 }
 
 // TermQuery matches documents whose field exactly equals the provided value.
@@ -56,7 +67,8 @@ type MatchQuery struct {
 	Field     string  `json:"field"`
 	Value     string  `json:"value"`
 	Boost     float64 `json:"boost,omitempty"`
-	Fuzziness int     `json:"fuzziness,omitempty"` // 0 = disabled, 1-2 = max DL edit distance for zero-hit tokens
+	Fuzziness int     `json:"fuzziness,omitempty"` // 0 = disabled, 1-3 = max DL edit distance for zero-hit tokens
+	Operator  string  `json:"operator,omitempty"`  // "or" (default) | "and"
 }
 
 // RangeQuery constraints the field to a value window.
@@ -86,7 +98,8 @@ type HybridQuery struct {
 	Decay        float64 `json:"decay,omitempty"`
 	MaxFanOut    int     `json:"max_fan_out,omitempty"`
 	Epsilon      float64 `json:"epsilon,omitempty"`
-	Fuzziness    int     `json:"fuzziness,omitempty"` // 0 = disabled, 1-2 = max DL edit distance for zero-hit tokens
+	Fuzziness    int     `json:"fuzziness,omitempty"` // 0 = disabled, 1-3 = max DL edit distance for zero-hit tokens
+	Operator     string  `json:"operator,omitempty"`  // "or" (default) | "and"
 	ExpansionCap    float64 `json:"expansion_cap,omitempty"`    // max boost multiplier for expanded terms (default 0.3)
 	MaxDF           int64   `json:"max_df,omitempty"`           // skip expanded terms with DF above this threshold (default 5000)
 	EnergyThreshold float64 `json:"energy_threshold,omitempty"` // minimum energy to explore a node during spread activation (default 0.01)
@@ -205,6 +218,15 @@ func (c *Clause) normalize(allowMatch bool) error {
 		}
 		return c.Hybrid.normalize()
 	}
+	if c.Bool != nil {
+		if !allowMatch {
+			return &ValidationError{
+				Field:   "clause.bool",
+				Message: "bool operator is not allowed in this context",
+			}
+		}
+		return c.Bool.normalize()
+	}
 
 	return nil
 }
@@ -253,6 +275,14 @@ func (c Clause) validate(allowMatch bool, fieldPrefix string) error {
 			}
 		}
 		return c.Hybrid.validate(fieldPrefix + ".hybrid")
+	case c.Bool != nil:
+		if !allowMatch {
+			return &ValidationError{
+				Field:   fieldPrefix + ".bool",
+				Message: "bool operator is not allowed here",
+			}
+		}
+		return c.Bool.validate(fieldPrefix + ".bool")
 	default:
 		// Should be unreachable because populated() already guards this, but keep defensive.
 		return &ValidationError{
@@ -277,6 +307,9 @@ func (c Clause) populated() int {
 		count++
 	}
 	if c.Hybrid != nil {
+		count++
+	}
+	if c.Bool != nil {
 		count++
 	}
 	return count
@@ -330,6 +363,11 @@ func (m *MatchQuery) normalize() error {
 		m.Boost *= boost
 	}
 
+	if m.Operator == "" {
+		m.Operator = "or"
+	}
+	m.Operator = strings.ToLower(m.Operator)
+
 	return nil
 }
 
@@ -350,6 +388,18 @@ func (m MatchQuery) validate(fieldPrefix string) error {
 		return &ValidationError{
 			Field:   fieldPrefix + ".boost",
 			Message: "boost must be greater than zero",
+		}
+	}
+	if m.Operator != "or" && m.Operator != "and" {
+		return &ValidationError{
+			Field:   fieldPrefix + ".operator",
+			Message: "operator must be 'or' or 'and'",
+		}
+	}
+	if m.Fuzziness < 0 || m.Fuzziness > 3 {
+		return &ValidationError{
+			Field:   fieldPrefix + ".fuzziness",
+			Message: "fuzziness must be between 0 and 3",
 		}
 	}
 	return nil
@@ -511,6 +561,56 @@ func (h *HybridQuery) normalize() error {
 		h.EnergyThreshold = 0.01
 	}
 
+	if h.Operator == "" {
+		h.Operator = "or"
+	}
+	h.Operator = strings.ToLower(h.Operator)
+
+	return nil
+}
+
+func (b *BoolQuery) normalize() error {
+	for i := range b.Should {
+		if err := b.Should[i].normalize(true); err != nil {
+			return err
+		}
+	}
+	for i := range b.Must {
+		if err := b.Must[i].normalize(true); err != nil {
+			return err
+		}
+	}
+	for i := range b.MustNot {
+		if err := b.MustNot[i].normalize(false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b BoolQuery) validate(fieldPrefix string) error {
+	total := len(b.Should) + len(b.Must) + len(b.MustNot)
+	if total == 0 {
+		return &ValidationError{
+			Field:   fieldPrefix,
+			Message: "bool query must have at least one clause (should, must, or must_not)",
+		}
+	}
+	for i, clause := range b.Should {
+		if err := clause.validate(true, fmt.Sprintf("%s.should[%d]", fieldPrefix, i)); err != nil {
+			return err
+		}
+	}
+	for i, clause := range b.Must {
+		if err := clause.validate(true, fmt.Sprintf("%s.must[%d]", fieldPrefix, i)); err != nil {
+			return err
+		}
+	}
+	for i, clause := range b.MustNot {
+		if err := clause.validate(false, fmt.Sprintf("%s.must_not[%d]", fieldPrefix, i)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -537,6 +637,18 @@ func (h HybridQuery) validate(fieldPrefix string) error {
 		return &ValidationError{
 			Field:   fieldPrefix + ".hops",
 			Message: "hops must be between 1 and 3",
+		}
+	}
+	if h.Operator != "or" && h.Operator != "and" {
+		return &ValidationError{
+			Field:   fieldPrefix + ".operator",
+			Message: "operator must be 'or' or 'and'",
+		}
+	}
+	if h.Fuzziness < 0 || h.Fuzziness > 3 {
+		return &ValidationError{
+			Field:   fieldPrefix + ".fuzziness",
+			Message: "fuzziness must be between 0 and 3",
 		}
 	}
 	return nil

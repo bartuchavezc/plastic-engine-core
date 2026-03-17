@@ -10,7 +10,7 @@ import (
 	"sync"
 
 	"plastic-engine-core/internal/core/cluster/indexes"
-	"plastic-engine-core/internal/core/search/segment"
+	"plastic-engine-core/internal/core/search/indexstore"
 
 	pebbledb "github.com/cockroachdb/pebble"
 )
@@ -18,13 +18,10 @@ import (
 // ManagerConfig holds configuration for the shard manager.
 type ManagerConfig struct {
 	RootDir string
-	// TermRegistryMergeConfig configures the global term registry.
-	// If nil, DefaultMergeConfig() is used.
-	TermRegistryMergeConfig *segment.MergeConfig
 
 	// NodeResources overrides auto-detection of CPU and memory.
 	// Leave zero to auto-detect from the OS (recommended).
-	NodeResources segment.NodeResourceProfile
+	NodeResources NodeResourceProfile
 }
 
 // Assignment describes how a shard should look when assigned to this node.
@@ -50,14 +47,13 @@ type Manager struct {
 	shards map[string]*Shard
 
 	// Global term registry shared by all shards (reduces goroutines and memory)
-	globalRegistry segment.TermRegistry
+	globalRegistry indexstore.TermRegistry
 	registryOnce   sync.Once
 	registryErr    error
-	registryConfig *segment.MergeConfig
 
 	// nodeConfig holds auto-tuned resource configuration.
-	nodeConfig    segment.NodeConfig
-	nodeResources segment.NodeResourceProfile
+	nodeConfig    NodeConfig
+	nodeResources NodeResourceProfile
 
 	// sharedCache is the Pebble block cache shared by all shard instances.
 	sharedCache *pebbledb.Cache
@@ -73,7 +69,7 @@ func NewManager(rootDir string) *Manager {
 
 // NewManagerWithConfig builds a Manager with the given configuration.
 func NewManagerWithConfig(config ManagerConfig) *Manager {
-	nodeCfg := segment.TuneForNode(config.NodeResources)
+	nodeCfg := TuneForNode(config.NodeResources)
 	log.Printf("[autotune] cpus=%d mem=%dMB shards=%d → %s",
 		config.NodeResources.CPUCount, config.NodeResources.MemoryLimitMB,
 		config.NodeResources.ShardCount, nodeCfg)
@@ -86,7 +82,6 @@ func NewManagerWithConfig(config ManagerConfig) *Manager {
 	return &Manager{
 		rootDir:        config.RootDir,
 		shards:         make(map[string]*Shard),
-		registryConfig: config.TermRegistryMergeConfig,
 		nodeConfig:     nodeCfg,
 		nodeResources:  config.NodeResources,
 		sharedCache:    sharedCache,
@@ -94,7 +89,7 @@ func NewManagerWithConfig(config ManagerConfig) *Manager {
 }
 
 // NodeConfig returns the auto-tuned resource configuration for this node.
-func (m *Manager) NodeConfig() segment.NodeConfig {
+func (m *Manager) NodeConfig() NodeConfig {
 	return m.nodeConfig
 }
 
@@ -107,7 +102,7 @@ func (m *Manager) ensureGlobalRegistry() error {
 			return
 		}
 
-		registry, err := segment.NewPebbleTermRegistry(segment.PebbleRegistryConfig{
+		registry, err := indexstore.NewPebbleTermRegistry(indexstore.PebbleRegistryConfig{
 			DataDir: registryDir,
 		})
 		if err != nil {
@@ -154,7 +149,7 @@ func (m *Manager) ensureLocalShard(assignment Assignment) error {
 		m.mu.Lock()
 		existing.Info = assignment
 		if existing.Segments == nil {
-			segmentMgr, err := segment.NewManager(m.segmentConfig(m.shardPath(assignment.ID)))
+			segmentMgr, err := indexstore.NewManager(m.segmentConfig(m.shardPath(assignment.ID)))
 			if err != nil {
 				m.mu.Unlock()
 				return fmt.Errorf("reopen segment manager for shard %s: %w", assignment.ID, err)
@@ -184,7 +179,7 @@ func (m *Manager) openShard(assignment Assignment) error {
 		return fmt.Errorf("write manifest for shard %s: %w", assignment.ID, err)
 	}
 
-	segmentMgr, err := segment.NewManager(m.segmentConfig(shardPath))
+	segmentMgr, err := indexstore.NewManager(m.segmentConfig(shardPath))
 	if err != nil {
 		return fmt.Errorf("open segment manager for shard %s: %w", assignment.ID, err)
 	}
@@ -202,13 +197,13 @@ func (m *Manager) retune(shardCount int) {
 		return
 	}
 	profile.ShardCount = shardCount
-	newCfg := segment.TuneForNode(profile)
+	newCfg := TuneForNode(profile)
 	log.Printf("[autotune] retune: shards=%d → %s", shardCount, newCfg)
 	m.nodeConfig = newCfg
 }
 
-// segmentConfig builds a segment.Config for a shard using auto-tuned node config.
-func (m *Manager) segmentConfig(dataDir string) segment.Config {
+// segmentConfig builds a indexstore.Config for a shard using auto-tuned node config.
+func (m *Manager) segmentConfig(dataDir string) indexstore.Config {
 	cfg := m.nodeConfig.SegmentCfg()
 	cfg.DataDir = dataDir
 	cfg.TermRegistry = m.globalRegistry
@@ -370,7 +365,7 @@ func (m *Manager) loadExistingShards() error {
 			continue
 		}
 
-		segmentMgr, err := segment.NewManager(m.segmentConfig(shardPath))
+		segmentMgr, err := indexstore.NewManager(m.segmentConfig(shardPath))
 		if err != nil {
 			return fmt.Errorf("open existing shard %s: %w", id, err)
 		}

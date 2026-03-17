@@ -7,6 +7,7 @@ import (
 	"math"
 
 	pebbledb "github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/bloom"
 )
 
 // ErrNotFound is returned when a key does not exist.
@@ -70,6 +71,11 @@ type StoreConfig struct {
 	// Cache is an optional shared block cache. nil = Pebble creates an 8MB default.
 	// The caller owns the lifecycle (Unref). PebbleStore will NOT close this cache.
 	Cache *pebbledb.Cache
+
+	// EnableBloomFilters enables bloom filters on SSTables.
+	// Reduces read I/O for point lookups (Get, GetDF, term registry) at the cost
+	// of ~1.2 bytes per key in SSTable filter blocks. ~1% false positive rate.
+	EnableBloomFilters bool
 }
 
 // DefaultStoreConfig returns the default configuration optimized for indexing performance.
@@ -79,6 +85,7 @@ func DefaultStoreConfig() StoreConfig {
 		MaxConcurrentCompactions: 1,     // Limit compaction parallelism per shard
 		MemTableSize:             0,     // Use Pebble default
 		DisableDiskHealthCheck:   false, // Keep health checks enabled by default
+		EnableBloomFilters:       true,  // Reduce read I/O for point lookups
 	}
 }
 
@@ -163,6 +170,12 @@ func NewPebbleStoreWithConfig(path string, cfg StoreConfig) (*PebbleStore, error
 
 	if cfg.Cache != nil {
 		opts.Cache = cfg.Cache
+	}
+
+	if cfg.EnableBloomFilters {
+		opts.Levels = []pebbledb.LevelOptions{{
+			FilterPolicy: bloom.FilterPolicy(10), // 10 bits/key, ~1% false positive rate
+		}}
 	}
 
 	db, err := pebbledb.Open(path, opts)
