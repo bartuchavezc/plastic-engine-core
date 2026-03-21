@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"plastic-engine-core/internal/core/ml"
+	"plastic-engine-core/internal/core/ml/embeddings"
 	"plastic-engine-core/internal/core/search/knowledge"
 
 	"go.opentelemetry.io/otel"
@@ -83,6 +85,12 @@ type Manager struct {
 	pressureLevel atomic.Int32
 	memLimitBytes int64
 
+	// ML integration
+	edgeWeighter   ml.EdgeWeighter
+	embeddingStore *embeddings.PebbleEmbeddingStore
+	graphEnricher  ml.GraphEnricher
+	modelEvictFn   func()
+
 	// Stats
 	indexedDocs atomic.Int64
 	searches    atomic.Int64
@@ -150,15 +158,37 @@ func NewManager(config Config) (*Manager, error) {
 		termMatrix = tm
 	}
 
+	// Open embedding store if dimension is configured
+	var embStore *embeddings.PebbleEmbeddingStore
+	if config.EmbeddingDim > 0 {
+		es, err := embeddings.NewPebbleEmbeddingStore(embeddings.PebbleEmbeddingStoreConfig{
+			DataDir: config.DataDir,
+			Dim:     config.EmbeddingDim,
+			Cache:   config.Cache,
+		})
+		if err != nil {
+			if termMatrix != nil {
+				termMatrix.Close()
+			}
+			store.Close()
+			return nil, fmt.Errorf("open embedding store: %w", err)
+		}
+		embStore = es
+	}
+
 	m := &Manager{
-		store:        store,
-		registry:     registry,
-		ownsRegistry: ownsRegistry,
-		accumulator:  &termAccumulator{terms: make(map[string]int64, 1024)},
-		cooccurrence: cooc,
-		termMatrix:   termMatrix,
-		config:       config,
-		closeCh:      make(chan struct{}),
+		store:          store,
+		registry:       registry,
+		ownsRegistry:   ownsRegistry,
+		accumulator:    &termAccumulator{terms: make(map[string]int64, 1024)},
+		cooccurrence:   cooc,
+		termMatrix:     termMatrix,
+		config:         config,
+		closeCh:        make(chan struct{}),
+		edgeWeighter:   config.EdgeWeighter,
+		embeddingStore: embStore,
+		graphEnricher:  config.GraphEnricher,
+		modelEvictFn:   config.ModelEvictFn,
 	}
 
 	// Recover totalDocs from the posting store
@@ -186,6 +216,11 @@ func (m *Manager) startBackgroundWorkers() {
 	if m.cooccurrence != nil {
 		m.wg.Add(1)
 		go m.cooccurrenceDrainWorker()
+	}
+
+	if m.graphEnricher != nil && m.termMatrix != nil {
+		m.wg.Add(1)
+		go m.gnnSleepWorker()
 	}
 }
 
@@ -218,6 +253,11 @@ func (m *Manager) heapMonitor() {
 				level = 0
 			}
 			m.pressureLevel.Store(level)
+
+			// Evict idle ML models under high pressure
+			if level >= 2 && m.modelEvictFn != nil {
+				m.modelEvictFn()
+			}
 		}
 	}
 }
@@ -430,6 +470,14 @@ func (m *Manager) TermMatrix() *knowledge.AdjacencyMatrix {
 	return m.termMatrix
 }
 
+// SnapshotDF returns a snapshot of all term document frequencies from the posting store.
+func (m *Manager) SnapshotDF() map[string]int64 {
+	if m.store == nil {
+		return nil
+	}
+	return m.store.SnapshotDF()
+}
+
 // drainTermsToMatrix drains accumulated term deltas to the adjacency matrix.
 func (m *Manager) drainTermsToMatrix() {
 	if m.matrix == nil {
@@ -500,7 +548,31 @@ func (m *Manager) coldEpochCooccurrence() {
 
 		var weight float64
 		var source string
+
+		npmiWeight := computeNPMIWeight(p.Count, dfA, dfB, totalDocs, avgWeight)
+
 		switch m.cooccurrence.cfg.WeightingMethod {
+		case "ml":
+			if m.edgeWeighter != nil {
+				w, err := m.edgeWeighter.WeightEdge(ml.EdgeWeightInput{
+					CooccCount:  p.Count,
+					DFA:         dfA,
+					DFB:         dfB,
+					TotalDocs:   totalDocs,
+					AvgWeight:   avgWeight,
+					CurrentNPMI: npmiWeight,
+				})
+				if err == nil && w > 0 {
+					weight = w
+					source = "ml_weight"
+				} else {
+					weight = npmiWeight
+					source = "pmi"
+				}
+			} else {
+				weight = npmiWeight
+				source = "pmi"
+			}
 		case "llr":
 			weight = computeLLRWeight(p.Count, dfA, dfB, totalDocs, avgWeight)
 			source = "llr"
@@ -508,7 +580,7 @@ func (m *Manager) coldEpochCooccurrence() {
 			weight = computeDiceWeight(p.Count, dfA, dfB, totalDocs, avgWeight)
 			source = "dice"
 		default:
-			weight = computeNPMIWeight(p.Count, dfA, dfB, totalDocs, avgWeight)
+			weight = npmiWeight
 			source = "pmi"
 		}
 		if weight <= 0 {
@@ -549,6 +621,79 @@ func (m *Manager) Flush() error {
 	return nil
 }
 
+// EmbeddingLookup returns the embedding lookup interface, or nil if not configured.
+func (m *Manager) EmbeddingLookup() ml.EmbeddingLookup {
+	if m.embeddingStore != nil {
+		return m.embeddingStore
+	}
+	return nil
+}
+
+// gnnSleepWorker periodically runs GNN enrichment when heap pressure is 0.
+func (m *Manager) gnnSleepWorker() {
+	defer m.wg.Done()
+
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.closeCh:
+			return
+		case <-ticker.C:
+			if m.pressureLevel.Load() != 0 {
+				continue // only run at pressure 0
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			m.runGNNEnrichment(ctx)
+			cancel()
+		}
+	}
+}
+
+// runGNNEnrichment executes a GNN enrichment batch on the term co-occurrence graph.
+func (m *Manager) runGNNEnrichment(ctx context.Context) {
+	if m.graphEnricher == nil || m.termMatrix == nil {
+		return
+	}
+
+	// Get a batch of node IDs from the term matrix
+	nodeIDs := m.termMatrix.ListNodes("", 100)
+	if len(nodeIDs) == 0 {
+		return
+	}
+
+	// Build getEdges callback
+	getEdges := func(nodeID string) []ml.Edge {
+		edges := m.termMatrix.GetEdges(nodeID, 0)
+		result := make([]ml.Edge, len(edges))
+		for i, e := range edges {
+			result[i] = ml.Edge{To: e.To, Weight: e.Data.Weight}
+		}
+		return result
+	}
+
+	newEdges, err := m.graphEnricher.EnrichBatch(ctx, nodeIDs, getEdges)
+	if err != nil {
+		return
+	}
+
+	for _, ne := range newEdges {
+		// Abort if pressure has risen
+		if m.pressureLevel.Load() > 0 {
+			return
+		}
+
+		edgeData := knowledge.EdgeData{
+			Weight:   ne.Weight,
+			EdgeType: "gnn_predicted",
+			Source:   ne.Source,
+		}
+		_ = m.termMatrix.AddEdge(ne.From, ne.To, edgeData)
+		_ = m.termMatrix.AddEdge(ne.To, ne.From, edgeData)
+	}
+}
+
 // Close closes the manager and all resources.
 func (m *Manager) Close() error {
 	if m.closed.Swap(true) {
@@ -566,6 +711,11 @@ func (m *Manager) Close() error {
 	// Close posting store
 	if m.store != nil {
 		m.store.Close()
+	}
+
+	// Close embedding store
+	if m.embeddingStore != nil {
+		m.embeddingStore.Close()
 	}
 
 	// Close term co-occurrence matrix

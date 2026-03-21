@@ -20,6 +20,8 @@ import (
 	searchnode "plastic-engine-core/internal/core/search"
 	client "plastic-engine-core/internal/core/search/client"
 	"plastic-engine-core/internal/core/search/document"
+	"plastic-engine-core/internal/core/search/indexstore"
+	"plastic-engine-core/internal/core/search/knowledge"
 	searchquery "plastic-engine-core/internal/core/search/query"
 	"plastic-engine-core/internal/core/search/shards"
 	"plastic-engine-core/internal/pkg/logger"
@@ -156,12 +158,16 @@ func main() {
 	// Create term lookup service for term index APIs
 	termLookupService := searchquery.NewTermLookupService(manager, log)
 
+	// Create ML exporter adapter backed by shard manager
+	mlExporter := &shardMLExporter{manager: manager}
+
 	// Build router with observability middleware
 	baseRouter := searchhttp.NewRouterWithConfig(searchhttp.RouterConfig{
 		Indexer:     indexService,
 		Searcher:    searchService,
 		ShardSyncer: manager,
 		TermLookup:  termLookupService,
+		MLExporter:  mlExporter,
 		Logger:      log,
 	})
 
@@ -265,4 +271,43 @@ func main() {
 	}
 
 	log.Info("search node shutting down")
+}
+
+// shardMLExporter adapts shards.Manager to the searchhttp.MLExporter interface.
+type shardMLExporter struct {
+	manager *shards.Manager
+}
+
+func (e *shardMLExporter) GetShardTermMatrix(shardID string) (*knowledge.AdjacencyMatrix, bool) {
+	shard, ok := e.manager.GetShard(shardID)
+	if !ok || shard.Segments == nil {
+		return nil, false
+	}
+	tm := shard.Segments.TermMatrix()
+	return tm, tm != nil
+}
+
+func (e *shardMLExporter) GetShardDFSnapshot(shardID string) (map[string]int64, bool) {
+	shard, ok := e.manager.GetShard(shardID)
+	if !ok || shard.Segments == nil {
+		return nil, false
+	}
+	snap := shard.Segments.SnapshotDF()
+	return snap, snap != nil
+}
+
+func (e *shardMLExporter) GetShardTotalDocs(shardID string) (int64, bool) {
+	shard, ok := e.manager.GetShard(shardID)
+	if !ok || shard.Segments == nil {
+		return 0, false
+	}
+	return shard.Segments.GetTotalDocs(), true
+}
+
+func (e *shardMLExporter) GetShardManager(shardID string) (*indexstore.Manager, bool) {
+	shard, ok := e.manager.GetShard(shardID)
+	if !ok || shard.Segments == nil {
+		return nil, false
+	}
+	return shard.Segments, true
 }

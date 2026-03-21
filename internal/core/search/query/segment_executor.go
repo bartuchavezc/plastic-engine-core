@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"plastic-engine-core/internal/core/ml"
 	"plastic-engine-core/internal/core/search/knowledge"
 	"plastic-engine-core/internal/core/search/indexstore"
 )
@@ -42,12 +43,14 @@ type QueryAnalyzer interface {
 
 // SegmentExecutor executes queries against a segment-based shard.
 type SegmentExecutor struct {
-	shardID        string
-	segmentMgr     SegmentManager
-	queryAnalyzer  QueryAnalyzer
-	scorer         *BM25Scorer
-	pipeline       indexstore.SearchPipeline
-	hybridMetadata *HybridExpansionInfo
+	shardID         string
+	segmentMgr      SegmentManager
+	queryAnalyzer   QueryAnalyzer
+	scorer          *BM25Scorer
+	pipeline        indexstore.SearchPipeline
+	hybridMetadata  *HybridExpansionInfo
+	expansionScorer ml.ExpansionScorer  // nil = use topNExpansions
+	embeddingLookup ml.EmbeddingLookup  // nil = skip embedding features
 }
 
 // NewSegmentExecutor creates a query executor for a segment-based shard with default pipeline.
@@ -70,6 +73,23 @@ func NewSegmentExecutorWithPipeline(shardID string, segmentMgr SegmentManager, a
 		queryAnalyzer: analyzer,
 		scorer:        NewBM25ScorerFromPipeline(pipeline.Scoring),
 		pipeline:      pipeline,
+	}
+}
+
+// NewSegmentExecutorWithML creates a query executor with ML dependencies.
+func NewSegmentExecutorWithML(
+	shardID string, segmentMgr SegmentManager, analyzer QueryAnalyzer,
+	pipeline indexstore.SearchPipeline,
+	expansionScorer ml.ExpansionScorer, embeddingLookup ml.EmbeddingLookup,
+) *SegmentExecutor {
+	return &SegmentExecutor{
+		shardID:         shardID,
+		segmentMgr:      segmentMgr,
+		queryAnalyzer:   analyzer,
+		scorer:          NewBM25ScorerFromPipeline(pipeline.Scoring),
+		pipeline:        pipeline,
+		expansionScorer: expansionScorer,
+		embeddingLookup: embeddingLookup,
 	}
 }
 
@@ -96,6 +116,9 @@ func (e *SegmentExecutor) resolveGraphConfig(q HybridQuery) indexstore.GraphTrav
 	}
 	if q.MaxDF > 0 {
 		cfg.MaxDF = q.MaxDF
+	}
+	if q.EmbeddingAlpha > 0 {
+		cfg.EmbeddingAlpha = q.EmbeddingAlpha
 	}
 	return cfg
 }
@@ -437,12 +460,25 @@ func (e *SegmentExecutor) executeHybrid(ctx context.Context, q HybridQuery, scor
 		} else {
 			// Flat OR: expansion scores go to separate map for RRF
 			allExpanded := make(map[string]float64)
+			embAlpha := graphCfg.EmbeddingAlpha
+
 			for _, token := range tokens {
 				termID := q.Field + "\x00" + token
-				spread := termMatrix.SpreadActivation(
-					termID, entryEnergy, graphCfg.Hops, graphCfg.Decay,
-					graphCfg.MaxFanOut, graphCfg.Epsilon, graphCfg.EnergyThreshold,
-				)
+
+				var spread map[string]float64
+				if e.embeddingLookup != nil && embAlpha > 0 {
+					spread = termMatrix.SpreadActivationWithEmbeddings(
+						termID, entryEnergy, graphCfg.Hops, graphCfg.Decay,
+						graphCfg.MaxFanOut, graphCfg.Epsilon, graphCfg.EnergyThreshold,
+						e.embeddingLookup, embAlpha,
+					)
+				} else {
+					spread = termMatrix.SpreadActivation(
+						termID, entryEnergy, graphCfg.Hops, graphCfg.Decay,
+						graphCfg.MaxFanOut, graphCfg.Epsilon, graphCfg.EnergyThreshold,
+					)
+				}
+
 				for id, w := range spread {
 					if _, orig := originalSet[id]; orig {
 						continue
@@ -455,7 +491,42 @@ func (e *SegmentExecutor) executeHybrid(ctx context.Context, q HybridQuery, scor
 			if maxExp <= 0 {
 				maxExp = 10
 			}
-			selected := topNExpansions(allExpanded, maxExp)
+
+			// Use ML expansion scorer if available, otherwise topNExpansions
+			var selected map[string]float64
+			if e.expansionScorer != nil {
+				candidates := make([]ml.ExpansionCandidate, 0, len(allExpanded))
+				for id, energy := range allExpanded {
+					df := e.segmentMgr.GetDF(id)
+					var cosSim float64
+					if e.embeddingLookup != nil {
+						if sim, ok := e.embeddingLookup.CentroidSimilarity(tokens, id); ok {
+							cosSim = sim
+						}
+					}
+					candidates = append(candidates, ml.ExpansionCandidate{
+						TermID:      id,
+						GraphEnergy: energy,
+						DF:          df,
+						CosineSim:   cosSim,
+					})
+				}
+
+				scored, err := e.expansionScorer.ScoreExpansions(tokens, candidates)
+				if err == nil && len(scored) > 0 {
+					selected = make(map[string]float64, maxExp)
+					for i, sc := range scored {
+						if i >= maxExp {
+							break
+						}
+						selected[sc.TermID] = sc.GraphEnergy
+					}
+				} else {
+					selected = topNExpansions(allExpanded, maxExp)
+				}
+			} else {
+				selected = topNExpansions(allExpanded, maxExp)
+			}
 
 			// Score expanded terms into separate map (not into flatScores)
 			for termID, weight := range selected {

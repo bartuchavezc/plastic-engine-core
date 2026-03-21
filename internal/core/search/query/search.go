@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"plastic-engine-core/internal/adapters/telemetry/metrics"
+	"plastic-engine-core/internal/core/ml"
 	"plastic-engine-core/internal/core/search/indexstore"
 	"plastic-engine-core/internal/pkg/logger"
 )
@@ -36,8 +37,10 @@ type Response struct {
 
 // SegmentManagerWithPipeline bundles a segment manager with the index's search pipeline.
 type SegmentManagerWithPipeline struct {
-	Manager  SegmentManager
-	Pipeline indexstore.SearchPipeline
+	Manager         SegmentManager
+	Pipeline        indexstore.SearchPipeline
+	ExpansionScorer ml.ExpansionScorer // resolved from Pipeline.Graph.ExpansionModel
+	EmbeddingLookup ml.EmbeddingLookup // resolved from Pipeline.Graph.EmbeddingModel
 }
 
 // SegmentManagerGetter provides access to segment managers (with pipeline) by shard ID.
@@ -165,7 +168,12 @@ func (s *SearchService) executeOnShard(ctx context.Context, shardID string, req 
 		pipeline = pipeline.Merge(*req.Pipeline)
 	}
 
-	executor := NewSegmentExecutorWithPipeline(shardID, smp.Manager, s.queryAnalyzer, pipeline)
+	var executor *SegmentExecutor
+	if smp.ExpansionScorer != nil || smp.EmbeddingLookup != nil {
+		executor = NewSegmentExecutorWithML(shardID, smp.Manager, s.queryAnalyzer, pipeline, smp.ExpansionScorer, smp.EmbeddingLookup)
+	} else {
+		executor = NewSegmentExecutorWithPipeline(shardID, smp.Manager, s.queryAnalyzer, pipeline)
+	}
 	hits, total, err := executor.Execute(ctx, req)
 	result := ShardResult{
 		ShardID: shardID,

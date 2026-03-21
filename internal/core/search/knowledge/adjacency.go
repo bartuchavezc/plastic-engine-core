@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 
+	"plastic-engine-core/internal/core/ml"
+
 	pebblestore "plastic-engine-core/internal/adapters/storage/pebble"
 
 	pebbledb "github.com/cockroachdb/pebble"
@@ -30,6 +32,14 @@ func sourceToEnum(s string) byte {
 		return 2
 	case "user":
 		return 3
+	case "gnn":
+		return 4
+	case "llr":
+		return 5
+	case "dice":
+		return 6
+	case "ml_weight":
+		return 7
 	default:
 		return 255
 	}
@@ -46,6 +56,14 @@ func enumToSource(b byte) string {
 		return "agent"
 	case 3:
 		return "user"
+	case 4:
+		return "gnn"
+	case 5:
+		return "llr"
+	case 6:
+		return "dice"
+	case 7:
+		return "ml_weight"
 	default:
 		return ""
 	}
@@ -568,6 +586,86 @@ func (am *AdjacencyMatrix) SpreadActivation(
 	return result
 }
 
+// SpreadActivationWithEmbeddings is like SpreadActivation but blends edge weights
+// with embedding cosine similarity when embLookup is non-nil and embAlpha > 0.
+// weight = embAlpha*cosineSim + (1-embAlpha)*edgeWeight
+func (am *AdjacencyMatrix) SpreadActivationWithEmbeddings(
+	startNode string, entryEnergy float64, maxHops int, decay float64,
+	maxFanOut int, epsilon float64, energyThreshold float64,
+	embLookup ml.EmbeddingLookup, embAlpha float64,
+) map[string]float64 {
+	if maxHops <= 0 || entryEnergy <= 0 {
+		return nil
+	}
+	if decay <= 0 || decay > 1 {
+		decay = 0.7
+	}
+	if maxFanOut <= 0 {
+		maxFanOut = 50
+	}
+	if epsilon < 0 || epsilon > 1 {
+		epsilon = 0.05
+	}
+
+	bi, err := am.db.NewBoundedIterator()
+	if err != nil {
+		return nil
+	}
+	defer bi.Close()
+
+	result := make(map[string]float64)
+	visited := make(map[string]struct{})
+
+	h := &activationHeap{{node: startNode, energy: entryEnergy, hops: 0}}
+	heap.Init(h)
+
+	for h.Len() > 0 {
+		cur := heap.Pop(h).(activationEntry)
+
+		if _, seen := visited[cur.node]; seen {
+			continue
+		}
+		visited[cur.node] = struct{}{}
+
+		if cur.node != startNode {
+			result[cur.node] = cur.energy
+		}
+
+		if cur.hops >= maxHops {
+			continue
+		}
+
+		edges := am.getEdgesCachedOrIter(cur.node, bi)
+		selected := selectTopKEpsilon(edges, startNode, maxFanOut, epsilon)
+
+		for _, edge := range selected {
+			if _, seen := visited[edge.To]; seen {
+				continue
+			}
+
+			weight := edge.Data.Weight
+
+			// Blend with embedding similarity if available
+			if embLookup != nil && embAlpha > 0 {
+				if sim, ok := embLookup.CosineSimilarity(cur.node, edge.To); ok {
+					weight = embAlpha*sim + (1-embAlpha)*weight
+				}
+			}
+
+			newEnergy := cur.energy * weight * decay
+			if newEnergy >= energyThreshold {
+				heap.Push(h, activationEntry{
+					node:   edge.To,
+					energy: newEnergy,
+					hops:   cur.hops + 1,
+				})
+			}
+		}
+	}
+
+	return result
+}
+
 // getEdgesCachedOrIter retrieves edges for a node, checking the LRU cache first.
 // On cache miss it uses the provided BoundedIterator to scan edges inline.
 // Does NOT populate the cache to avoid thrashing during traversal.
@@ -767,6 +865,43 @@ type AdjacencyStats struct {
 	TermCount int `json:"term_count"`
 	EdgeCount int `json:"edge_count"`
 	NodeCount int `json:"node_count"`
+}
+
+// IterateEdges iterates over all outgoing edges in the matrix, calling fn for each.
+// If fn returns false, iteration stops early. This is more efficient than
+// ListNodes + GetEdges when you need to process all edges.
+func (am *AdjacencyMatrix) IterateEdges(fn func(from, to string, data EdgeData) bool) error {
+	return am.db.PrefixIterBytes(edgeOutPrefix, func(key, value []byte) bool {
+		// Key: "E\x00out\x00" + nodeA + "\x00" + nodeB
+		rest := string(key[len(edgeOutPrefix):])
+		sep := strings.Index(rest, "\x00")
+		if sep < 0 {
+			return true // skip malformed
+		}
+		from := rest[:sep]
+		to := rest[sep+1:]
+
+		data, err := decodeEdgeData(value)
+		if err != nil {
+			return true // skip bad entries
+		}
+
+		return fn(from, to, data)
+	})
+}
+
+// ListTermDFs returns all term DFs in the matrix as a map of "field\x00term" → DF.
+func (am *AdjacencyMatrix) ListTermDFs() map[string]int64 {
+	result := make(map[string]int64, 4096)
+	am.db.PrefixIterBytes(termPrefix, func(key, value []byte) bool {
+		termKey := string(key[len(termPrefix):])
+		if len(value) >= 8 {
+			df := int64(binary.BigEndian.Uint64(value))
+			result[termKey] = df
+		}
+		return true
+	})
+	return result
 }
 
 func (am *AdjacencyMatrix) Stats() AdjacencyStats {

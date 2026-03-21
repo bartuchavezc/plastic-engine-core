@@ -47,8 +47,11 @@ type CooccurrenceConfig struct {
 	// IncludeFields restricts co-occurrence extraction to these fields. Empty = all fields.
 	IncludeFields []string `json:"include_fields,omitempty"`
 
-	// WeightingMethod selects the edge weight formula: "npmi" (default), "llr", "dice".
+	// WeightingMethod selects the edge weight formula: "npmi" (default), "llr", "dice", "ml".
 	WeightingMethod string `json:"weighting_method,omitempty"`
+
+	// WeightingModel is the model name in the ModelStore, used when WeightingMethod == "ml".
+	WeightingModel string `json:"weighting_model,omitempty"`
 
 	// PositionGapMode controls position numbering: "original" (default) keeps analyzer gaps,
 	// "compressed" renumbers positions sequentially within each sentence after stopword removal.

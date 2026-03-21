@@ -3,6 +3,8 @@ package indexstore
 import (
 	"strconv"
 
+	"plastic-engine-core/internal/core/ml"
+
 	pebbledb "github.com/cockroachdb/pebble"
 )
 
@@ -41,6 +43,21 @@ type Config struct {
 
 	// Cache is an optional shared Pebble block cache for all Pebble instances.
 	Cache *pebbledb.Cache
+
+	// EmbeddingDim is the dimensionality of term embeddings. 0 = no embeddings.
+	EmbeddingDim int
+
+	// EdgeWeighter is an optional ML-based edge weighter for co-occurrence edges.
+	// If non-nil and CooccurrenceConfig.WeightingMethod == "ml", this is used instead
+	// of statistical weighting (NPMI/LLR/Dice).
+	EdgeWeighter ml.EdgeWeighter
+
+	// GraphEnricher is an optional GNN-based enricher for discovering new edges.
+	// Runs as a background "sleep" process when heap pressure is 0.
+	GraphEnricher ml.GraphEnricher
+
+	// ModelEvictFn is called by the heap monitor to evict idle ML models under pressure.
+	ModelEvictFn func()
 }
 
 // DamerauLevenshteinDistance computes the optimal string alignment distance

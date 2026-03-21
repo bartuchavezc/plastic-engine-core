@@ -7,6 +7,13 @@ type SearchPipeline struct {
 	Name    string               `json:"name,omitempty"`
 	Graph   GraphTraversalConfig `json:"graph"`
 	Scoring ScoringConfig        `json:"scoring"`
+	ML      MLConfig             `json:"ml,omitempty"`
+}
+
+// MLConfig holds ML-related configuration for the search pipeline.
+type MLConfig struct {
+	GNNModel   string `json:"gnn_model,omitempty"`
+	GNNEnabled bool   `json:"gnn_enabled,omitempty"`
 }
 
 // GraphTraversalConfig controls spread-activation traversal on the co-occurrence graph.
@@ -19,6 +26,15 @@ type GraphTraversalConfig struct {
 	MaxExpansions   int     `json:"max_expansions,omitempty"`
 	MaxDF           int64   `json:"max_df,omitempty"`
 	ExpansionCap    float64 `json:"expansion_cap,omitempty"`
+
+	// EmbeddingModel is the name of the embedding model in the model store.
+	EmbeddingModel string `json:"embedding_model,omitempty"`
+	// EmbeddingAlpha blends embedding similarity with edge weight: 0=statistical, 1=embedding.
+	EmbeddingAlpha float64 `json:"embedding_alpha,omitempty"`
+	// ExpansionModel is the name of the LTR model in the model store for expansion scoring.
+	ExpansionModel string `json:"expansion_model,omitempty"`
+	// GNNDiscount multiplier for GNN-sourced edges during traversal.
+	GNNDiscount float64 `json:"gnn_discount,omitempty"`
 }
 
 // ScoringConfig holds BM25 and ranking parameters.
@@ -71,6 +87,7 @@ func (p SearchPipeline) Merge(over SearchPipeline) SearchPipeline {
 	}
 	out.Graph = out.Graph.merge(over.Graph)
 	out.Scoring = out.Scoring.merge(over.Scoring)
+	out.ML = out.ML.merge(over.ML)
 	return out
 }
 
@@ -100,6 +117,18 @@ func (g GraphTraversalConfig) merge(over GraphTraversalConfig) GraphTraversalCon
 	if over.ExpansionCap > 0 {
 		out.ExpansionCap = over.ExpansionCap
 	}
+	if over.EmbeddingModel != "" {
+		out.EmbeddingModel = over.EmbeddingModel
+	}
+	if over.EmbeddingAlpha > 0 {
+		out.EmbeddingAlpha = over.EmbeddingAlpha
+	}
+	if over.ExpansionModel != "" {
+		out.ExpansionModel = over.ExpansionModel
+	}
+	if over.GNNDiscount > 0 {
+		out.GNNDiscount = over.GNNDiscount
+	}
 	return out
 }
 
@@ -119,6 +148,17 @@ func (s ScoringConfig) merge(over ScoringConfig) ScoringConfig {
 	}
 	if over.ExpansionBlend > 0 {
 		out.ExpansionBlend = over.ExpansionBlend
+	}
+	return out
+}
+
+func (m MLConfig) merge(over MLConfig) MLConfig {
+	out := m
+	if over.GNNModel != "" {
+		out.GNNModel = over.GNNModel
+	}
+	if over.GNNEnabled {
+		out.GNNEnabled = true
 	}
 	return out
 }

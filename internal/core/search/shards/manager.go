@@ -8,8 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"plastic-engine-core/internal/core/cluster/indexes"
+	"plastic-engine-core/internal/core/ml/weights"
+	"plastic-engine-core/internal/core/ml/gnn"
+	"plastic-engine-core/internal/core/models"
 	"plastic-engine-core/internal/core/search/indexstore"
 
 	pebbledb "github.com/cockroachdb/pebble"
@@ -22,6 +26,10 @@ type ManagerConfig struct {
 	// NodeResources overrides auto-detection of CPU and memory.
 	// Leave zero to auto-detect from the OS (recommended).
 	NodeResources NodeResourceProfile
+
+	// ModelStore is an optional ML model store for ONNX inference.
+	// If provided, models are resolved from here for edge weighting, expansion, and GNN.
+	ModelStore *models.ModelStore
 }
 
 // Assignment describes how a shard should look when assigned to this node.
@@ -60,6 +68,9 @@ type Manager struct {
 	// sharedCache is the Pebble block cache shared by all shard instances.
 	sharedCache *pebbledb.Cache
 
+	// modelStore provides ONNX model sessions for ML-based features.
+	modelStore *models.ModelStore
+
 	loadOnce sync.Once
 	loadErr  error
 }
@@ -87,6 +98,7 @@ func NewManagerWithConfig(config ManagerConfig) *Manager {
 		nodeConfig:     nodeCfg,
 		nodeResources:  config.NodeResources,
 		sharedCache:    sharedCache,
+		modelStore:     config.ModelStore,
 	}
 }
 
@@ -235,6 +247,32 @@ func (m *Manager) segmentConfig(dataDir string, assignment Assignment) indexstor
 	if idxCfg.PositionGapMode != "" {
 		cfg.CooccurrenceConfig.PositionGapMode = idxCfg.PositionGapMode
 	}
+	if idxCfg.WeightingModel != "" {
+		cfg.CooccurrenceConfig.WeightingModel = idxCfg.WeightingModel
+	}
+
+	// Wire ML dependencies from model store
+	if m.modelStore != nil {
+		// Edge weighter
+		if idxCfg.WeightingMethod == "ml" && idxCfg.WeightingModel != "" {
+			cfg.EdgeWeighter = weights.NewONNXWeighter(m.modelStore, idxCfg.WeightingModel)
+		}
+
+		// GNN enricher
+		if assignment.SearchPipeline.ML.GNNEnabled && assignment.SearchPipeline.ML.GNNModel != "" {
+			cfg.GraphEnricher = gnn.NewGNNEnricher(m.modelStore, assignment.SearchPipeline.ML.GNNModel, 100)
+		}
+
+		// Model eviction callback
+		cfg.ModelEvictFn = func() {
+			m.modelStore.EvictIdle(5 * time.Minute)
+		}
+	}
+
+	// Embedding dimension from pipeline config
+	if assignment.SearchPipeline.Graph.EmbeddingModel != "" {
+		cfg.EmbeddingDim = 128 // default Node2Vec dim
+	}
 
 	return cfg
 }
@@ -275,6 +313,11 @@ func (m *Manager) Close() error {
 			firstErr = fmt.Errorf("close global registry: %w", err)
 		}
 		m.globalRegistry = nil
+	}
+
+	if m.modelStore != nil {
+		m.modelStore.Close()
+		m.modelStore = nil
 	}
 
 	if m.sharedCache != nil {

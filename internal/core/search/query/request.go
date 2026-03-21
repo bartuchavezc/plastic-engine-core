@@ -106,6 +106,7 @@ type HybridQuery struct {
 	ExpansionCap    float64 `json:"expansion_cap,omitempty"`    // max boost multiplier for expanded terms (default 0.3)
 	MaxDF           int64   `json:"max_df,omitempty"`           // skip expanded terms with DF above this threshold (default 5000)
 	EnergyThreshold float64 `json:"energy_threshold,omitempty"` // minimum energy to explore a node during spread activation (default 0.01)
+	EmbeddingAlpha  float64 `json:"embedding_alpha,omitempty"`  // blend: 0=statistical, 1=embedding (default 0 = no blending)
 }
 
 // Normalize prepares the request by trimming whitespace, applying defaults and

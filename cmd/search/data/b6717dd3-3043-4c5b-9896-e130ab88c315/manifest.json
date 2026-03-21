@@ -1,0 +1,13 @@
+{
+  "ID": "b6717dd3-3043-4c5b-9896-e130ab88c315",
+  "IndexID": "product4",
+  "ShardKey": "h02",
+  "ShardStrategy": "",
+  "NeedsReplication": false,
+  "Primary": true,
+  "RangeHint": "h02",
+  "Analyzer": "standard",
+  "Tokenizer": "standard",
+  "MappingVersion": 0,
+  "Fields": null
+}

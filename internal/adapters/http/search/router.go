@@ -60,6 +60,7 @@ type RouterConfig struct {
 	ShardSyncer    ShardSyncer
 	TermLookup     TermLookup
 	KnowledgeStore KnowledgeStore
+	MLExporter     MLExporter
 	Logger         logger.Logger
 }
 
@@ -130,6 +131,17 @@ func NewRouterWithConfig(cfg RouterConfig) http.Handler {
 	})
 	mux.HandleFunc("/knowledge/stats", func(w http.ResponseWriter, r *http.Request) {
 		handleKnowledgeStats(w, r, cfg.KnowledgeStore, log)
+	})
+
+	// ML training data export APIs
+	mux.HandleFunc("/ml/export/edges", func(w http.ResponseWriter, r *http.Request) {
+		handleMLExportEdges(w, r, cfg.MLExporter, log)
+	})
+	mux.HandleFunc("/ml/export/graph", func(w http.ResponseWriter, r *http.Request) {
+		handleMLExportGraph(w, r, cfg.MLExporter, log)
+	})
+	mux.HandleFunc("/ml/export/expansion", func(w http.ResponseWriter, r *http.Request) {
+		handleMLExportExpansion(w, r, cfg.MLExporter, log)
 	})
 
 	return mux

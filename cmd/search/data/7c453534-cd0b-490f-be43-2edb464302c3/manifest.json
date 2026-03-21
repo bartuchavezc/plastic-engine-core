@@ -1,0 +1,77 @@
+{
+  "ID": "7c453534-cd0b-490f-be43-2edb464302c3",
+  "IndexID": "product5",
+  "ShardKey": "h00",
+  "ShardStrategy": "automatic",
+  "NeedsReplication": false,
+  "Primary": true,
+  "RangeHint": "",
+  "Analyzer": "standard",
+  "Tokenizer": "standard",
+  "MappingVersion": 0,
+  "Fields": [
+    {
+      "Name": "product_brand",
+      "Type": "keyword",
+      "Analyzer": "",
+      "Tokenizer": "",
+      "Stored": true,
+      "Required": false,
+      "Indexed": true
+    },
+    {
+      "Name": "product_bullet_point",
+      "Type": "text",
+      "Analyzer": "",
+      "Tokenizer": "",
+      "Stored": true,
+      "Required": false,
+      "Indexed": true
+    },
+    {
+      "Name": "product_color",
+      "Type": "keyword",
+      "Analyzer": "",
+      "Tokenizer": "",
+      "Stored": true,
+      "Required": false,
+      "Indexed": true
+    },
+    {
+      "Name": "product_description",
+      "Type": "text",
+      "Analyzer": "",
+      "Tokenizer": "",
+      "Stored": true,
+      "Required": false,
+      "Indexed": true
+    },
+    {
+      "Name": "product_id",
+      "Type": "keyword",
+      "Analyzer": "",
+      "Tokenizer": "",
+      "Stored": true,
+      "Required": true,
+      "Indexed": true
+    },
+    {
+      "Name": "product_locale",
+      "Type": "keyword",
+      "Analyzer": "",
+      "Tokenizer": "",
+      "Stored": true,
+      "Required": false,
+      "Indexed": true
+    },
+    {
+      "Name": "product_title",
+      "Type": "text",
+      "Analyzer": "",
+      "Tokenizer": "",
+      "Stored": true,
+      "Required": true,
+      "Indexed": true
+    }
+  ]
+}
