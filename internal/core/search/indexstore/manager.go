@@ -481,7 +481,6 @@ func (m *Manager) coldEpochCooccurrence() {
 		return
 	}
 
-	maxDF := m.cooccurrence.cfg.MaxDFThreshold
 	minCount := m.cooccurrence.cfg.MinPairCount
 
 	for i := range pairs {
@@ -493,15 +492,25 @@ func (m *Manager) coldEpochCooccurrence() {
 		dfA := dfSnapshot[p.TermA]
 		dfB := dfSnapshot[p.TermB]
 
-		if dfA > maxDF || dfB > maxDF {
-			continue
-		}
 		if dfA <= 0 || dfB <= 0 {
 			continue
 		}
 
 		avgWeight := p.WeightedSum / float64(p.Count)
-		weight := computeNPMIWeight(p.Count, dfA, dfB, totalDocs, avgWeight)
+
+		var weight float64
+		var source string
+		switch m.cooccurrence.cfg.WeightingMethod {
+		case "llr":
+			weight = computeLLRWeight(p.Count, dfA, dfB, totalDocs, avgWeight)
+			source = "llr"
+		case "dice":
+			weight = computeDiceWeight(p.Count, dfA, dfB, totalDocs, avgWeight)
+			source = "dice"
+		default:
+			weight = computeNPMIWeight(p.Count, dfA, dfB, totalDocs, avgWeight)
+			source = "pmi"
+		}
 		if weight <= 0 {
 			continue
 		}
@@ -509,7 +518,7 @@ func (m *Manager) coldEpochCooccurrence() {
 		edgeData := knowledge.EdgeData{
 			Weight:   weight,
 			EdgeType: "cooccurrence",
-			Source:   "pmi",
+			Source:   source,
 		}
 		_ = m.termMatrix.AddEdge(p.TermA, p.TermB, edgeData)
 		_ = m.termMatrix.AddEdge(p.TermB, p.TermA, edgeData)

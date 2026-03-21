@@ -258,16 +258,18 @@ func (c *Coordinator) CreateIndex(ctx context.Context, req indexes.CreateIndexRe
 
 	// Create the command payload
 	payload := CreateIndexPayload{
-		ID:               req.ID,
-		Name:             req.Name,
-		ShardStrategy:    string(req.ShardStrategy),
-		ShardTemplate:    req.ShardTemplate,
-		ShardConfig:      shardConfigJSON,
-		DefaultAnalyzer:  req.DefaultAnalyzer,
-		DefaultTokenizer: req.DefaultTokenizer,
-		MappingVersion:   req.MappingVersion,
-		FieldMappings:    fieldMappingsJSON,
-		CreatedAt:        time.Now().UTC(),
+		ID:                 req.ID,
+		Name:               req.Name,
+		ShardStrategy:      string(req.ShardStrategy),
+		ShardTemplate:      req.ShardTemplate,
+		ShardConfig:        shardConfigJSON,
+		DefaultAnalyzer:    req.DefaultAnalyzer,
+		DefaultTokenizer:   req.DefaultTokenizer,
+		MappingVersion:     req.MappingVersion,
+		FieldMappings:      fieldMappingsJSON,
+		CooccurrenceConfig: req.CooccurrenceConfigRaw,
+		SearchPipeline:     req.SearchPipelineRaw,
+		CreatedAt:          time.Now().UTC(),
 	}
 
 	cmd, err := NewCommand(CmdCreateIndex, payload)

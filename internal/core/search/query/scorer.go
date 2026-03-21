@@ -2,6 +2,8 @@ package query
 
 import (
 	"math"
+
+	"plastic-engine-core/internal/core/search/indexstore"
 )
 
 // BM25Config holds the tuning parameters for BM25 scoring.
@@ -35,6 +37,14 @@ func NewBM25Scorer() *BM25Scorer {
 
 // NewBM25ScorerWithConfig creates a scorer with custom parameters.
 func NewBM25ScorerWithConfig(cfg BM25Config) *BM25Scorer {
+	return &BM25Scorer{
+		K1: cfg.K1,
+		B:  cfg.B,
+	}
+}
+
+// NewBM25ScorerFromPipeline creates a scorer from pipeline scoring config.
+func NewBM25ScorerFromPipeline(cfg indexstore.ScoringConfig) *BM25Scorer {
 	return &BM25Scorer{
 		K1: cfg.K1,
 		B:  cfg.B,
@@ -123,29 +133,19 @@ func (s *BM25Scorer) tfNorm(tf, docLen int, avgDocLen float64) float64 {
 // Coordinate Matching + Position Ordering
 // --------------------------------------------------------------------------
 
-// DefaultCoordWeight controls the exponent for coordinate matching.
-// Higher values penalize partial matches more aggressively.
-const DefaultCoordWeight = 2.0
-
 // CoordFactor returns a penalty/boost based on how many query terms matched.
-// For single-term queries it returns 1.0 (no effect).
-// For multi-term queries: ratio^DefaultCoordWeight, so a doc matching 2/4 terms
-// gets 0.25 while 4/4 gets 1.0.
-func CoordFactor(matchedTerms, totalTerms int) float64 {
+// coordWeight controls the exponent (higher = more penalty for partial matches).
+func CoordFactor(matchedTerms, totalTerms int, coordWeight float64) float64 {
 	if totalTerms <= 1 {
 		return 1.0
 	}
 	ratio := float64(matchedTerms) / float64(totalTerms)
-	return math.Pow(ratio, DefaultCoordWeight)
+	return math.Pow(ratio, coordWeight)
 }
 
-// OrderingBonusFactor controls the maximum bonus for terms appearing in query order.
-const OrderingBonusFactor = 0.5
-
 // OrderingBoost calculates a proximity-aware bonus for query terms appearing in
-// document order. For each consecutive pair, 1/gap gives full credit only to
-// adjacent terms (gap=1→1.0, gap=2→0.5, gap=5→0.2). Out-of-order pairs score 0.
-func OrderingBoost(queryTermPositions []int) float64 {
+// document order. orderingFactor controls the maximum bonus magnitude.
+func OrderingBoost(queryTermPositions []int, orderingFactor float64) float64 {
 	if len(queryTermPositions) <= 1 {
 		return 1.0
 	}
@@ -158,7 +158,7 @@ func OrderingBoost(queryTermPositions []int) float64 {
 		}
 	}
 	ratio := pairScore / float64(totalPairs)
-	return 1.0 + OrderingBonusFactor*ratio
+	return 1.0 + orderingFactor*ratio
 }
 
 // --------------------------------------------------------------------------

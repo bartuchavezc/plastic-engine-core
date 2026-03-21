@@ -26,17 +26,19 @@ type ManagerConfig struct {
 
 // Assignment describes how a shard should look when assigned to this node.
 type Assignment struct {
-	ID               string
-	IndexID          string
-	ShardKey         string
-	ShardStrategy    indexes.ShardStrategy
-	NeedsReplication bool
-	Primary          bool
-	RangeHint        string // placeholder for the shard's logical range
-	Analyzer         string
-	Tokenizer        string
-	MappingVersion   int
-	Fields           []indexes.FieldMapping
+	ID                 string
+	IndexID            string
+	ShardKey           string
+	ShardStrategy      indexes.ShardStrategy
+	NeedsReplication   bool
+	Primary            bool
+	RangeHint          string // placeholder for the shard's logical range
+	Analyzer           string
+	Tokenizer          string
+	MappingVersion     int
+	Fields             []indexes.FieldMapping
+	CooccurrenceConfig indexstore.CooccurrenceConfig `json:"cooccurrence_config,omitempty"`
+	SearchPipeline     indexstore.SearchPipeline     `json:"search_pipeline,omitempty"`
 }
 
 // Manager coordinates the lifecycle of shards owned by a search node.
@@ -149,7 +151,7 @@ func (m *Manager) ensureLocalShard(assignment Assignment) error {
 		m.mu.Lock()
 		existing.Info = assignment
 		if existing.Segments == nil {
-			segmentMgr, err := indexstore.NewManager(m.segmentConfig(m.shardPath(assignment.ID)))
+			segmentMgr, err := indexstore.NewManager(m.segmentConfig(m.shardPath(assignment.ID), assignment))
 			if err != nil {
 				m.mu.Unlock()
 				return fmt.Errorf("reopen segment manager for shard %s: %w", assignment.ID, err)
@@ -179,7 +181,7 @@ func (m *Manager) openShard(assignment Assignment) error {
 		return fmt.Errorf("write manifest for shard %s: %w", assignment.ID, err)
 	}
 
-	segmentMgr, err := indexstore.NewManager(m.segmentConfig(shardPath))
+	segmentMgr, err := indexstore.NewManager(m.segmentConfig(shardPath, assignment))
 	if err != nil {
 		return fmt.Errorf("open segment manager for shard %s: %w", assignment.ID, err)
 	}
@@ -202,12 +204,38 @@ func (m *Manager) retune(shardCount int) {
 	m.nodeConfig = newCfg
 }
 
-// segmentConfig builds a indexstore.Config for a shard using auto-tuned node config.
-func (m *Manager) segmentConfig(dataDir string) indexstore.Config {
+// segmentConfig builds a indexstore.Config for a shard using auto-tuned node config,
+// merging per-index cooccurrence config from the assignment.
+func (m *Manager) segmentConfig(dataDir string, assignment Assignment) indexstore.Config {
 	cfg := m.nodeConfig.SegmentCfg()
 	cfg.DataDir = dataDir
 	cfg.TermRegistry = m.globalRegistry
 	cfg.Cache = m.sharedCache
+
+	// Merge per-index cooccurrence config (graph construction params)
+	// but keep worker tuning from the node-level autotune.
+	idxCfg := assignment.CooccurrenceConfig
+	if idxCfg.MinPairCount > 0 {
+		cfg.CooccurrenceConfig.MinPairCount = idxCfg.MinPairCount
+	}
+	if idxCfg.MaxDFThreshold > 0 {
+		cfg.CooccurrenceConfig.MaxDFThreshold = idxCfg.MaxDFThreshold
+	}
+	if idxCfg.DistanceDecay != "" {
+		cfg.CooccurrenceConfig.DistanceDecay = idxCfg.DistanceDecay
+	}
+	if len(idxCfg.IncludeFields) > 0 {
+		cfg.CooccurrenceConfig.IncludeFields = idxCfg.IncludeFields
+	}
+	cfg.CooccurrenceConfig.WindowSize = idxCfg.WindowSize
+	cfg.CooccurrenceConfig.Disabled = idxCfg.Disabled
+	if idxCfg.WeightingMethod != "" {
+		cfg.CooccurrenceConfig.WeightingMethod = idxCfg.WeightingMethod
+	}
+	if idxCfg.PositionGapMode != "" {
+		cfg.CooccurrenceConfig.PositionGapMode = idxCfg.PositionGapMode
+	}
+
 	return cfg
 }
 
@@ -365,7 +393,7 @@ func (m *Manager) loadExistingShards() error {
 			continue
 		}
 
-		segmentMgr, err := indexstore.NewManager(m.segmentConfig(shardPath))
+		segmentMgr, err := indexstore.NewManager(m.segmentConfig(shardPath, assignment))
 		if err != nil {
 			return fmt.Errorf("open existing shard %s: %w", id, err)
 		}

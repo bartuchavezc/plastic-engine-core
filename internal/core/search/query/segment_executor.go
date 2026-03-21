@@ -46,17 +46,58 @@ type SegmentExecutor struct {
 	segmentMgr     SegmentManager
 	queryAnalyzer  QueryAnalyzer
 	scorer         *BM25Scorer
+	pipeline       indexstore.SearchPipeline
 	hybridMetadata *HybridExpansionInfo
 }
 
-// NewSegmentExecutor creates a query executor for a segment-based shard.
+// NewSegmentExecutor creates a query executor for a segment-based shard with default pipeline.
 func NewSegmentExecutor(shardID string, segmentMgr SegmentManager, analyzer QueryAnalyzer) *SegmentExecutor {
+	pipeline := indexstore.DefaultSearchPipeline()
 	return &SegmentExecutor{
 		shardID:       shardID,
 		segmentMgr:    segmentMgr,
 		queryAnalyzer: analyzer,
-		scorer:        NewBM25Scorer(),
+		scorer:        NewBM25ScorerFromPipeline(pipeline.Scoring),
+		pipeline:      pipeline,
 	}
+}
+
+// NewSegmentExecutorWithPipeline creates a query executor with a resolved pipeline.
+func NewSegmentExecutorWithPipeline(shardID string, segmentMgr SegmentManager, analyzer QueryAnalyzer, pipeline indexstore.SearchPipeline) *SegmentExecutor {
+	return &SegmentExecutor{
+		shardID:       shardID,
+		segmentMgr:    segmentMgr,
+		queryAnalyzer: analyzer,
+		scorer:        NewBM25ScorerFromPipeline(pipeline.Scoring),
+		pipeline:      pipeline,
+	}
+}
+
+// resolveGraphConfig merges pipeline graph defaults with per-query HybridQuery overrides.
+func (e *SegmentExecutor) resolveGraphConfig(q HybridQuery) indexstore.GraphTraversalConfig {
+	cfg := e.pipeline.Graph
+	if q.Hops > 0 {
+		cfg.Hops = q.Hops
+	}
+	if q.Decay > 0 {
+		cfg.Decay = q.Decay
+	}
+	if q.MaxFanOut > 0 {
+		cfg.MaxFanOut = q.MaxFanOut
+	}
+	if q.Epsilon > 0 {
+		cfg.Epsilon = q.Epsilon
+	}
+	if q.EnergyThreshold > 0 {
+		cfg.EnergyThreshold = q.EnergyThreshold
+	}
+	if q.ExpansionCap > 0 {
+		cfg.ExpansionCap = q.ExpansionCap
+	}
+	if q.MaxDF > 0 {
+		cfg.MaxDF = q.MaxDF
+	}
+	return cfg
 }
 
 // Execute runs the query and returns matching hits.
@@ -193,7 +234,7 @@ func (e *SegmentExecutor) executeMatch(ctx context.Context, q MatchQuery, scorin
 	// Build hits with coord factor (no ordering yet)
 	hits := make([]Hit, 0, len(docScores))
 	for docID, score := range docScores {
-		coord := CoordFactor(docTermCounts[docID], len(tokens))
+		coord := CoordFactor(docTermCounts[docID], len(tokens), e.pipeline.Scoring.CoordWeight)
 		hits = append(hits, Hit{
 			DocID:   docID,
 			ShardID: e.shardID,
@@ -224,7 +265,7 @@ func (e *SegmentExecutor) applyOrderingBoost(hits []Hit, field string, tokens []
 				positions = append(positions, pos[0]) // first position (sorted asc in Pebble value)
 			}
 		}
-		hits[i].Score *= OrderingBoost(positions)
+		hits[i].Score *= OrderingBoost(positions, e.pipeline.Scoring.OrderingFactor)
 	}
 }
 
@@ -277,6 +318,9 @@ func (e *SegmentExecutor) executeRange(_ context.Context, q RangeQuery) ([]Hit, 
 type conceptGroup struct {
 	docScores map[string]float64
 }
+
+// rrfK is the standard Reciprocal Rank Fusion constant (same as Elasticsearch default).
+const rrfK = 60
 
 func (e *SegmentExecutor) executeHybrid(ctx context.Context, q HybridQuery, scoringCtx ScoringContext) ([]Hit, error) {
 	tokens := e.queryAnalyzer.AnalyzeQuery(q.Value)
@@ -339,8 +383,15 @@ func (e *SegmentExecutor) executeHybrid(ctx context.Context, q HybridQuery, scor
 	}
 
 	// Phase 2: Graph expansion (sequential — no goroutines)
+	graphCfg := e.resolveGraphConfig(q)
 	expandedTerms := make(map[string]float64)
 	termMatrix := e.segmentMgr.TermMatrix()
+
+	// For RRF (flat OR mode): collect expansion scores into a separate map
+	var expansionScores map[string]float64
+	if !useConceptGroups {
+		expansionScores = make(map[string]float64)
+	}
 
 	if termMatrix != nil {
 		originalSet := make(map[string]struct{}, len(tokens))
@@ -351,12 +402,12 @@ func (e *SegmentExecutor) executeHybrid(ctx context.Context, q HybridQuery, scor
 		entryEnergy := 1.0 / float64(len(tokens))
 
 		if useConceptGroups {
-			// Per-token expansion: each token's expansions go to its concept group
+			// AND mode: keep additive fusion within concept groups (RRF not applicable)
 			for tokenIdx, token := range tokens {
 				termID := q.Field + "\x00" + token
 				spread := termMatrix.SpreadActivation(
-					termID, entryEnergy, q.Hops, q.Decay,
-					q.MaxFanOut, q.Epsilon, q.EnergyThreshold,
+					termID, entryEnergy, graphCfg.Hops, graphCfg.Decay,
+					graphCfg.MaxFanOut, graphCfg.Epsilon, graphCfg.EnergyThreshold,
 				)
 				filtered := make(map[string]float64)
 				for id, w := range spread {
@@ -367,7 +418,7 @@ func (e *SegmentExecutor) executeHybrid(ctx context.Context, q HybridQuery, scor
 				selected := topNExpansions(filtered, 5)
 				for termID, weight := range selected {
 					expandedTerms[termID] = weight
-					if df := e.segmentMgr.GetDF(termID); df > q.MaxDF {
+					if df := e.segmentMgr.GetDF(termID); df > graphCfg.MaxDF {
 						continue
 					}
 					segmentHits, err := e.segmentMgr.SearchByTermID(termID)
@@ -379,18 +430,18 @@ func (e *SegmentExecutor) executeHybrid(ctx context.Context, q HybridQuery, scor
 						AvgDocLen: scoringCtx.AvgDocLen,
 						TermDF:    map[string]int64{termID: int64(len(segmentHits))},
 					}
-					boost := q.Boost * weight * q.ExpansionCap
+					boost := q.Boost * weight * graphCfg.ExpansionCap
 					e.scoreHitsInto(concepts[tokenIdx].docScores, segmentHits, termID, boost, localCtx)
 				}
 			}
 		} else {
-			// Flat OR: global top-10 expansion
+			// Flat OR: expansion scores go to separate map for RRF
 			allExpanded := make(map[string]float64)
 			for _, token := range tokens {
 				termID := q.Field + "\x00" + token
 				spread := termMatrix.SpreadActivation(
-					termID, entryEnergy, q.Hops, q.Decay,
-					q.MaxFanOut, q.Epsilon, q.EnergyThreshold,
+					termID, entryEnergy, graphCfg.Hops, graphCfg.Decay,
+					graphCfg.MaxFanOut, graphCfg.Epsilon, graphCfg.EnergyThreshold,
 				)
 				for id, w := range spread {
 					if _, orig := originalSet[id]; orig {
@@ -400,13 +451,16 @@ func (e *SegmentExecutor) executeHybrid(ctx context.Context, q HybridQuery, scor
 				}
 			}
 
-			const maxExpansions = 10
-			selected := topNExpansions(allExpanded, maxExpansions)
+			maxExp := graphCfg.MaxExpansions
+			if maxExp <= 0 {
+				maxExp = 10
+			}
+			selected := topNExpansions(allExpanded, maxExp)
 
-			// Sequential search for expanded terms
+			// Score expanded terms into separate map (not into flatScores)
 			for termID, weight := range selected {
 				expandedTerms[termID] = weight
-				if df := e.segmentMgr.GetDF(termID); df > q.MaxDF {
+				if df := e.segmentMgr.GetDF(termID); df > graphCfg.MaxDF {
 					continue
 				}
 				segmentHits, err := e.segmentMgr.SearchByTermID(termID)
@@ -418,8 +472,8 @@ func (e *SegmentExecutor) executeHybrid(ctx context.Context, q HybridQuery, scor
 					AvgDocLen: scoringCtx.AvgDocLen,
 					TermDF:    map[string]int64{termID: int64(len(segmentHits))},
 				}
-				boost := q.Boost * weight * q.ExpansionCap
-				e.scoreHitsInto(flatScores, segmentHits, termID, boost, localCtx)
+				boost := q.Boost * weight * graphCfg.ExpansionCap
+				e.scoreHitsInto(expansionScores, segmentHits, termID, boost, localCtx)
 			}
 		}
 	}
@@ -428,7 +482,7 @@ func (e *SegmentExecutor) executeHybrid(ctx context.Context, q HybridQuery, scor
 	var hits []Hit
 
 	if useConceptGroups {
-		// Intersect concept groups: docs must be in all active groups
+		// AND mode: intersect concept groups (unchanged — additive fusion)
 		activeGroups := 0
 		smallestIdx := -1
 		smallestSize := int(^uint(0) >> 1) // max int
@@ -462,7 +516,7 @@ func (e *SegmentExecutor) executeHybrid(ctx context.Context, q HybridQuery, scor
 				if !inAll {
 					continue
 				}
-				coord := CoordFactor(docTermCounts[docID], len(tokens))
+				coord := CoordFactor(docTermCounts[docID], len(tokens), e.pipeline.Scoring.CoordWeight)
 				hits = append(hits, Hit{
 					DocID:   docID,
 					ShardID: e.shardID,
@@ -480,7 +534,7 @@ func (e *SegmentExecutor) executeHybrid(ctx context.Context, q HybridQuery, scor
 				}
 				hits = make([]Hit, 0, len(merged))
 				for docID, score := range merged {
-					coord := CoordFactor(docTermCounts[docID], len(tokens))
+					coord := CoordFactor(docTermCounts[docID], len(tokens), e.pipeline.Scoring.CoordWeight)
 					hits = append(hits, Hit{
 						DocID:   docID,
 						ShardID: e.shardID,
@@ -489,37 +543,116 @@ func (e *SegmentExecutor) executeHybrid(ctx context.Context, q HybridQuery, scor
 				}
 			}
 		}
+
+		// AND mode: ordering boost after building hits
+		if len(tokens) > 1 && len(hits) > 0 {
+			sort.Slice(hits, func(i, j int) bool { return hits[i].Score > hits[j].Score })
+			topN := len(hits)
+			if topN > topKForOrdering {
+				topN = topKForOrdering
+			}
+			e.applyOrderingBoost(hits[:topN], q.Field, tokens)
+		}
 	} else {
-		// Flat OR with coord (no ordering yet — applied in Pass 2)
-		hits = make([]Hit, 0, len(flatScores))
+		// ── Flat OR: RRF fusion of lexical + expansion rankings ──
+
+		// Build lexical hits with coord factor
+		lexicalHits := make([]Hit, 0, len(flatScores))
 		for docID, score := range flatScores {
-			coord := CoordFactor(docTermCounts[docID], len(tokens))
-			hits = append(hits, Hit{
+			coord := CoordFactor(docTermCounts[docID], len(tokens), e.pipeline.Scoring.CoordWeight)
+			lexicalHits = append(lexicalHits, Hit{
 				DocID:   docID,
 				ShardID: e.shardID,
 				Score:   score * coord,
 			})
 		}
-	}
 
-	// Pass 2: Ordering boost via point lookups for top-K only
-	if len(tokens) > 1 && len(hits) > 0 {
-		sort.Slice(hits, func(i, j int) bool { return hits[i].Score > hits[j].Score })
-		topN := len(hits)
-		if topN > topKForOrdering {
-			topN = topKForOrdering
+		// Ordering boost on top-K lexical hits (before RRF ranking)
+		if len(tokens) > 1 && len(lexicalHits) > 0 {
+			sort.Slice(lexicalHits, func(i, j int) bool { return lexicalHits[i].Score > lexicalHits[j].Score })
+			topN := len(lexicalHits)
+			if topN > topKForOrdering {
+				topN = topKForOrdering
+			}
+			e.applyOrderingBoost(lexicalHits[:topN], q.Field, tokens)
 		}
-		e.applyOrderingBoost(hits[:topN], q.Field, tokens)
+
+		// RRF merge if we have expansion scores; otherwise pure lexical
+		if len(expansionScores) > 0 {
+			hits = e.rrfMerge(lexicalHits, expansionScores)
+		} else {
+			hits = lexicalHits
+		}
 	}
 
 	e.hybridMetadata = &HybridExpansionInfo{
 		OriginalTokens: tokens,
 		ExpandedTerms:  expandedTerms,
-		ExpansionHops:  q.Hops,
+		ExpansionHops:  graphCfg.Hops,
 		TotalExpanded:  len(expandedTerms),
 	}
 
 	return hits, nil
+}
+
+// rrfMerge combines lexical hits and expansion scores using Reciprocal Rank Fusion.
+// Lexical hits are already scored (BM25 + coord + ordering); expansion scores are raw BM25.
+// Each list is ranked independently, then combined: score = 1/(k+rank_lex) + blend/(k+rank_exp).
+func (e *SegmentExecutor) rrfMerge(lexicalHits []Hit, expansionScores map[string]float64) []Hit {
+	blend := e.pipeline.Scoring.ExpansionBlend
+
+	// Sort lexical hits by score desc (may already be sorted, but ensure after ordering boost)
+	sort.Slice(lexicalHits, func(i, j int) bool { return lexicalHits[i].Score > lexicalHits[j].Score })
+
+	// Build lexical rank map (1-indexed)
+	lexicalRank := make(map[string]int, len(lexicalHits))
+	for i, h := range lexicalHits {
+		lexicalRank[h.DocID] = i + 1
+	}
+
+	// Build expansion rank (1-indexed, sorted by score desc)
+	type docScore struct {
+		docID string
+		score float64
+	}
+	expSlice := make([]docScore, 0, len(expansionScores))
+	for docID, score := range expansionScores {
+		expSlice = append(expSlice, docScore{docID, score})
+	}
+	sort.Slice(expSlice, func(i, j int) bool { return expSlice[i].score > expSlice[j].score })
+
+	expansionRank := make(map[string]int, len(expSlice))
+	for i, ds := range expSlice {
+		expansionRank[ds.docID] = i + 1
+	}
+
+	// Collect all unique doc IDs from both rankings
+	allDocs := make(map[string]struct{}, len(lexicalRank)+len(expansionRank))
+	for docID := range lexicalRank {
+		allDocs[docID] = struct{}{}
+	}
+	for docID := range expansionRank {
+		allDocs[docID] = struct{}{}
+	}
+
+	kFloat := float64(rrfK)
+	hits := make([]Hit, 0, len(allDocs))
+	for docID := range allDocs {
+		var rrfScore float64
+		if rank, ok := lexicalRank[docID]; ok {
+			rrfScore += 1.0 / (kFloat + float64(rank))
+		}
+		if rank, ok := expansionRank[docID]; ok {
+			rrfScore += blend / (kFloat + float64(rank))
+		}
+		hits = append(hits, Hit{
+			DocID:   docID,
+			ShardID: e.shardID,
+			Score:   rrfScore,
+		})
+	}
+
+	return hits
 }
 
 func (e *SegmentExecutor) executeBool(ctx context.Context, q BoolQuery, scoringCtx ScoringContext) ([]Hit, error) {

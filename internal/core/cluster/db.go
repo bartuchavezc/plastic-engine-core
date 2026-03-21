@@ -168,5 +168,17 @@ func initializeCoordinatorSchema(db *sql.DB) error {
 		}
 	}
 
+	// Migration: add cooccurrence_config and search_pipeline columns
+	if _, err := db.Exec(`ALTER TABLE indexes ADD COLUMN cooccurrence_config TEXT`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("add indexes.cooccurrence_config column: %w", err)
+		}
+	}
+	if _, err := db.Exec(`ALTER TABLE indexes ADD COLUMN search_pipeline TEXT`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("add indexes.search_pipeline column: %w", err)
+		}
+	}
+
 	return nil
 }

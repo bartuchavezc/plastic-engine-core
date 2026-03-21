@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"plastic-engine-core/internal/adapters/telemetry/metrics"
+	"plastic-engine-core/internal/core/search/indexstore"
 	"plastic-engine-core/internal/pkg/logger"
 )
 
@@ -33,8 +34,14 @@ type Response struct {
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
-// SegmentManagerGetter provides access to segment managers by shard ID.
-type SegmentManagerGetter func(shardID string) (SegmentManager, bool)
+// SegmentManagerWithPipeline bundles a segment manager with the index's search pipeline.
+type SegmentManagerWithPipeline struct {
+	Manager  SegmentManager
+	Pipeline indexstore.SearchPipeline
+}
+
+// SegmentManagerGetter provides access to segment managers (with pipeline) by shard ID.
+type SegmentManagerGetter func(shardID string) (SegmentManagerWithPipeline, bool)
 
 // SearchService coordinates search across multiple shards.
 // It assumes shard routing has been resolved externally.
@@ -143,7 +150,7 @@ func (s *SearchService) executeParallel(ctx context.Context, shardIDs []string, 
 }
 
 func (s *SearchService) executeOnShard(ctx context.Context, shardID string, req Request) ShardResult {
-	segMgr, ok := s.getSegmentManager(shardID)
+	smp, ok := s.getSegmentManager(shardID)
 	if !ok {
 		return ShardResult{
 			ShardID: shardID,
@@ -151,7 +158,14 @@ func (s *SearchService) executeOnShard(ctx context.Context, shardID string, req 
 		}
 	}
 
-	executor := NewSegmentExecutor(shardID, segMgr, s.queryAnalyzer)
+	// Resolve pipeline: global default → index default → request override
+	pipeline := indexstore.DefaultSearchPipeline()
+	pipeline = pipeline.Merge(smp.Pipeline)
+	if req.Pipeline != nil {
+		pipeline = pipeline.Merge(*req.Pipeline)
+	}
+
+	executor := NewSegmentExecutorWithPipeline(shardID, smp.Manager, s.queryAnalyzer, pipeline)
 	hits, total, err := executor.Execute(ctx, req)
 	result := ShardResult{
 		ShardID: shardID,

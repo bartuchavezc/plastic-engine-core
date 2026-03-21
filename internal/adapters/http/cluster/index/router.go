@@ -45,15 +45,17 @@ type handler struct {
 }
 
 type createIndexRequest struct {
-	ID               string                   `json:"id"`
-	Name             string                   `json:"name"`
-	ShardConfig      *shardConfigBody         `json:"shard_config"`
-	DefaultAnalyzer  string                   `json:"default_analyzer"`
-	DefaultTokenizer string                   `json:"default_tokenizer"`
-	MappingVersion   int                      `json:"mapping_version"`
-	Dynamic          string                   `json:"dynamic"` // "true", "false", "strict"
-	FieldMappings    []createFieldMappingBody `json:"field_mappings"`
-	InitialShardKeys []string                 `json:"initial_shard_keys"`
+	ID                 string                   `json:"id"`
+	Name               string                   `json:"name"`
+	ShardConfig        *shardConfigBody         `json:"shard_config"`
+	DefaultAnalyzer    string                   `json:"default_analyzer"`
+	DefaultTokenizer   string                   `json:"default_tokenizer"`
+	MappingVersion     int                      `json:"mapping_version"`
+	Dynamic            string                   `json:"dynamic"` // "true", "false", "strict"
+	FieldMappings      []createFieldMappingBody `json:"field_mappings"`
+	InitialShardKeys   []string                 `json:"initial_shard_keys"`
+	CooccurrenceConfig json.RawMessage          `json:"cooccurrence_config,omitempty"`
+	SearchPipeline     json.RawMessage          `json:"search_pipeline,omitempty"`
 }
 
 type createFieldMappingBody struct {
@@ -169,14 +171,16 @@ func (h *handler) handleCreateIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req := indexes.CreateIndexRequest{
-		ID:               payload.ID,
-		Name:             payload.Name,
-		DefaultAnalyzer:  payload.DefaultAnalyzer,
-		DefaultTokenizer: payload.DefaultTokenizer,
-		MappingVersion:   payload.MappingVersion,
-		InitialShardKeys: append([]string(nil), payload.InitialShardKeys...),
-		FieldMappings:    make([]indexes.FieldMapping, 0, len(payload.FieldMappings)),
-		ShardConfig:      convertShardConfig(payload.ShardConfig),
+		ID:                    payload.ID,
+		Name:                  payload.Name,
+		DefaultAnalyzer:       payload.DefaultAnalyzer,
+		DefaultTokenizer:      payload.DefaultTokenizer,
+		MappingVersion:        payload.MappingVersion,
+		InitialShardKeys:      append([]string(nil), payload.InitialShardKeys...),
+		FieldMappings:         make([]indexes.FieldMapping, 0, len(payload.FieldMappings)),
+		ShardConfig:           convertShardConfig(payload.ShardConfig),
+		CooccurrenceConfigRaw: payload.CooccurrenceConfig,
+		SearchPipelineRaw:     payload.SearchPipeline,
 	}
 
 	for _, fm := range payload.FieldMappings {

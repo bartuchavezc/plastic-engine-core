@@ -146,16 +146,18 @@ func (e NotLeaderError) Unwrap() error {
 
 // CreateIndexPayload contains data for creating a new index.
 type CreateIndexPayload struct {
-	ID               string          `json:"id"`
-	Name             string          `json:"name"`
-	ShardStrategy    string          `json:"shard_strategy"`
-	ShardTemplate    string          `json:"shard_template,omitempty"`
-	ShardConfig      json.RawMessage `json:"shard_config,omitempty"`
-	DefaultAnalyzer  string          `json:"default_analyzer"`
-	DefaultTokenizer string          `json:"default_tokenizer"`
-	MappingVersion   int             `json:"mapping_version"`
-	FieldMappings    json.RawMessage `json:"field_mappings,omitempty"`
-	CreatedAt        time.Time       `json:"created_at"`
+	ID                 string          `json:"id"`
+	Name               string          `json:"name"`
+	ShardStrategy      string          `json:"shard_strategy"`
+	ShardTemplate      string          `json:"shard_template,omitempty"`
+	ShardConfig        json.RawMessage `json:"shard_config,omitempty"`
+	DefaultAnalyzer    string          `json:"default_analyzer"`
+	DefaultTokenizer   string          `json:"default_tokenizer"`
+	MappingVersion     int             `json:"mapping_version"`
+	FieldMappings      json.RawMessage `json:"field_mappings,omitempty"`
+	CooccurrenceConfig json.RawMessage `json:"cooccurrence_config,omitempty"`
+	SearchPipeline     json.RawMessage `json:"search_pipeline,omitempty"`
+	CreatedAt          time.Time       `json:"created_at"`
 }
 
 // RegisterNodePayload contains data for registering a node.

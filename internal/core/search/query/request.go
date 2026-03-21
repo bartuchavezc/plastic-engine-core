@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"plastic-engine-core/internal/core/search/indexstore"
 )
 
 const (
@@ -15,12 +17,13 @@ const (
 
 // Request describes the payload accepted by the search cluster.
 type Request struct {
-	IndexID  string   `json:"index_id,omitempty"`
-	ShardIDs []string `json:"shard_ids,omitempty"`
-	Query    Clause   `json:"query"`
-	Filters  []Clause `json:"filters,omitempty"`
-	Limit    int      `json:"limit,omitempty"`
-	Cursor   string   `json:"cursor,omitempty"`
+	IndexID  string                    `json:"index_id,omitempty"`
+	ShardIDs []string                  `json:"shard_ids,omitempty"`
+	Query    Clause                    `json:"query"`
+	Filters  []Clause                  `json:"filters,omitempty"`
+	Pipeline *indexstore.SearchPipeline `json:"pipeline,omitempty"` // per-query pipeline override
+	Limit    int                       `json:"limit,omitempty"`
+	Cursor   string                    `json:"cursor,omitempty"`
 }
 
 // ValidationError indicates the payload failed semantic validation.
@@ -539,27 +542,9 @@ func (h *HybridQuery) normalize() error {
 		h.Boost *= boost
 	}
 
-	if h.Hops <= 0 {
-		h.Hops = 1
-	}
-	if h.Decay <= 0 {
-		h.Decay = 0.7
-	}
-	if h.MaxFanOut <= 0 {
-		h.MaxFanOut = 15
-	}
-	if h.Epsilon <= 0 {
-		h.Epsilon = 0.05
-	}
-	if h.ExpansionCap <= 0 {
-		h.ExpansionCap = 0.3
-	}
-	if h.MaxDF <= 0 {
-		h.MaxDF = 5000
-	}
-	if h.EnergyThreshold <= 0 {
-		h.EnergyThreshold = 0.01
-	}
+	// Graph traversal params (Hops, Decay, MaxFanOut, etc.) are resolved at
+	// execution time via pipeline defaults + per-query overrides in resolveGraphConfig.
+	// Zero values here mean "use pipeline default".
 
 	if h.Operator == "" {
 		h.Operator = "or"
@@ -633,10 +618,10 @@ func (h HybridQuery) validate(fieldPrefix string) error {
 			Message: "boost must be greater than zero",
 		}
 	}
-	if h.Hops < 1 || h.Hops > 3 {
+	if h.Hops < 0 || h.Hops > 3 {
 		return &ValidationError{
 			Field:   fieldPrefix + ".hops",
-			Message: "hops must be between 1 and 3",
+			Message: "hops must be between 0 and 3 (0 = use pipeline default)",
 		}
 	}
 	if h.Operator != "or" && h.Operator != "and" {

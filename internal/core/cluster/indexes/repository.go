@@ -80,8 +80,9 @@ func (r *Repository) CreateIndex(ctx context.Context, req CreateIndexRequest) (C
 		`INSERT INTO indexes (
 			id, name, shard_strategy, shard_template, shard_config,
 			default_analyzer, default_tokenizer, mapping_version,
+			cooccurrence_config, search_pipeline,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.ID,
 		req.Name,
 		string(req.ShardStrategy),
@@ -90,6 +91,8 @@ func (r *Repository) CreateIndex(ctx context.Context, req CreateIndexRequest) (C
 		req.DefaultAnalyzer,
 		req.DefaultTokenizer,
 		mappingVersion,
+		nullableString(string(req.CooccurrenceConfigRaw)),
+		nullableString(string(req.SearchPipelineRaw)),
 		now,
 		now,
 	)
@@ -108,17 +111,19 @@ func (r *Repository) CreateIndex(ctx context.Context, req CreateIndexRequest) (C
 	}
 
 	def := IndexDefinition{
-		ID:               req.ID,
-		Name:             req.Name,
-		ShardStrategy:    req.ShardStrategy,
-		ShardTemplate:    req.ShardTemplate,
-		ShardConfig:      req.ShardConfig,
-		DefaultAnalyzer:  req.DefaultAnalyzer,
-		DefaultTokenizer: req.DefaultTokenizer,
-		FieldMappings:    append([]FieldMapping(nil), req.FieldMappings...),
-		MappingVersion:   mappingVersion,
-		CreatedAt:        now,
-		UpdatedAt:        now,
+		ID:                    req.ID,
+		Name:                  req.Name,
+		ShardStrategy:         req.ShardStrategy,
+		ShardTemplate:         req.ShardTemplate,
+		ShardConfig:           req.ShardConfig,
+		DefaultAnalyzer:       req.DefaultAnalyzer,
+		DefaultTokenizer:      req.DefaultTokenizer,
+		FieldMappings:         append([]FieldMapping(nil), req.FieldMappings...),
+		MappingVersion:        mappingVersion,
+		CooccurrenceConfigRaw: req.CooccurrenceConfigRaw,
+		SearchPipelineRaw:     req.SearchPipelineRaw,
+		CreatedAt:             now,
+		UpdatedAt:             now,
 	}
 
 	return CreateIndexResponse{Definition: def}, nil
@@ -129,6 +134,7 @@ func (r *Repository) GetIndex(ctx context.Context, id string) (IndexDefinition, 
 	const query = `SELECT
 		id, name, shard_strategy, shard_template, shard_config,
 		default_analyzer, default_tokenizer, mapping_version,
+		cooccurrence_config, search_pipeline,
 		created_at, updated_at
 	FROM indexes WHERE id = ?`
 
@@ -139,6 +145,7 @@ func (r *Repository) GetIndex(ctx context.Context, id string) (IndexDefinition, 
 
 	row := r.db.QueryRowContext(ctx, query, id)
 	var rawConfig sql.NullString
+	var rawCooccurrence, rawPipeline sql.NullString
 	if scanErr := row.Scan(
 		&def.ID,
 		&def.Name,
@@ -148,6 +155,8 @@ func (r *Repository) GetIndex(ctx context.Context, id string) (IndexDefinition, 
 		&def.DefaultAnalyzer,
 		&def.DefaultTokenizer,
 		&def.MappingVersion,
+		&rawCooccurrence,
+		&rawPipeline,
 		&def.CreatedAt,
 		&def.UpdatedAt,
 	); scanErr != nil {
@@ -166,6 +175,12 @@ func (r *Repository) GetIndex(ctx context.Context, id string) (IndexDefinition, 
 	if err := decodeShardConfigInto(&def, rawConfig.String); err != nil {
 		return IndexDefinition{}, err
 	}
+	if rawCooccurrence.Valid && rawCooccurrence.String != "" {
+		def.CooccurrenceConfigRaw = json.RawMessage(rawCooccurrence.String)
+	}
+	if rawPipeline.Valid && rawPipeline.String != "" {
+		def.SearchPipelineRaw = json.RawMessage(rawPipeline.String)
+	}
 
 	return def, nil
 }
@@ -175,6 +190,7 @@ func (r *Repository) ListIndexes(ctx context.Context) ([]IndexDefinition, error)
 	rows, err := r.db.QueryContext(ctx, `SELECT
 		id, name, shard_strategy, shard_template, shard_config,
 		default_analyzer, default_tokenizer, mapping_version,
+		cooccurrence_config, search_pipeline,
 		created_at, updated_at
 		FROM indexes
 		ORDER BY created_at ASC`)
@@ -189,9 +205,11 @@ func (r *Repository) ListIndexes(ctx context.Context) ([]IndexDefinition, error)
 	)
 	for rows.Next() {
 		var (
-			def           IndexDefinition
-			shardStrategy string
-			shardConfig   sql.NullString
+			def              IndexDefinition
+			shardStrategy    string
+			shardConfig      sql.NullString
+			rawCooccurrence  sql.NullString
+			rawPipeline      sql.NullString
 		)
 		if err := rows.Scan(
 			&def.ID,
@@ -202,6 +220,8 @@ func (r *Repository) ListIndexes(ctx context.Context) ([]IndexDefinition, error)
 			&def.DefaultAnalyzer,
 			&def.DefaultTokenizer,
 			&def.MappingVersion,
+			&rawCooccurrence,
+			&rawPipeline,
 			&def.CreatedAt,
 			&def.UpdatedAt,
 		); err != nil {
@@ -210,6 +230,12 @@ func (r *Repository) ListIndexes(ctx context.Context) ([]IndexDefinition, error)
 
 		def.ShardStrategy = ShardStrategy(shardStrategy)
 		rawConfigs[def.ID] = shardConfig.String
+		if rawCooccurrence.Valid && rawCooccurrence.String != "" {
+			def.CooccurrenceConfigRaw = json.RawMessage(rawCooccurrence.String)
+		}
+		if rawPipeline.Valid && rawPipeline.String != "" {
+			def.SearchPipelineRaw = json.RawMessage(rawPipeline.String)
+		}
 		defs = append(defs, def)
 	}
 

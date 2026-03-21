@@ -94,14 +94,25 @@ func (a *LocalApplier) applyCreateIndex(ctx context.Context, payload json.RawMes
 		shardConfig = string(p.ShardConfig)
 	}
 
+	cooccConfig := ""
+	if len(p.CooccurrenceConfig) > 0 {
+		cooccConfig = string(p.CooccurrenceConfig)
+	}
+	searchPipeline := ""
+	if len(p.SearchPipeline) > 0 {
+		searchPipeline = string(p.SearchPipeline)
+	}
+
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO indexes (
 			id, name, shard_strategy, shard_template, shard_config,
 			default_analyzer, default_tokenizer, mapping_version,
+			cooccurrence_config, search_pipeline,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.ID, p.Name, p.ShardStrategy, p.ShardTemplate, shardConfig,
 		p.DefaultAnalyzer, p.DefaultTokenizer, p.MappingVersion,
+		nullableString(cooccConfig), nullableString(searchPipeline),
 		now, now,
 	)
 	if err != nil {

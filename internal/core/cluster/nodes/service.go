@@ -3,6 +3,7 @@ package nodes
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"plastic-engine-core/internal/core/cluster/indexes"
+	"plastic-engine-core/internal/core/search/indexstore"
 	searchshards "plastic-engine-core/internal/core/search/shards"
 	"plastic-engine-core/internal/pkg/logger"
 )
@@ -273,6 +275,20 @@ func (s *Service) enrichAssignments(ctx context.Context, assignments []searchsha
 			assignment.Fields = append([]indexes.FieldMapping(nil), def.FieldMappings...)
 		}
 		assignment.ShardStrategy = def.ShardStrategy
+
+		// Decode per-index configs from raw JSON into typed fields
+		if len(def.CooccurrenceConfigRaw) > 0 {
+			var cc indexstore.CooccurrenceConfig
+			if err := json.Unmarshal(def.CooccurrenceConfigRaw, &cc); err == nil {
+				assignment.CooccurrenceConfig = cc
+			}
+		}
+		if len(def.SearchPipelineRaw) > 0 {
+			var sp indexstore.SearchPipeline
+			if err := json.Unmarshal(def.SearchPipelineRaw, &sp); err == nil {
+				assignment.SearchPipeline = sp
+			}
+		}
 	}
 
 	return assignments, nil

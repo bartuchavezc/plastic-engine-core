@@ -140,12 +140,15 @@ func main() {
 	defer indexService.Close()
 
 	// Create search service with segment manager getter
-	getSegmentManager := func(shardID string) (searchquery.SegmentManager, bool) {
+	getSegmentManager := func(shardID string) (searchquery.SegmentManagerWithPipeline, bool) {
 		shard, ok := manager.GetShard(shardID)
 		if !ok {
-			return nil, false
+			return searchquery.SegmentManagerWithPipeline{}, false
 		}
-		return shard.Segments, true
+		return searchquery.SegmentManagerWithPipeline{
+			Manager:  shard.Segments,
+			Pipeline: shard.Info.SearchPipeline,
+		}, true
 	}
 	queryAnalyzer := searchquery.NewStandardQueryAnalyzer("english")
 	searchService := searchquery.NewSearchService(getSegmentManager, queryAnalyzer, log)

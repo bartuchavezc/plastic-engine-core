@@ -1,6 +1,9 @@
 package indexes
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // ShardStrategy represents how documents will be distributed across shards.
 type ShardStrategy string
@@ -127,33 +130,37 @@ func (c NgramConfig) Validate() error {
 
 // IndexDefinition captures the full set of configuration for an index.
 type IndexDefinition struct {
-	ID               string
-	Name             string
-	ShardStrategy    ShardStrategy
-	ShardTemplate    string
-	ShardConfig      ShardConfig
-	DefaultAnalyzer  string
-	DefaultTokenizer string
-	FieldMappings    []FieldMapping
-	MappingVersion   int
-	NgramConfig      NgramConfig
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	ID                    string
+	Name                  string
+	ShardStrategy         ShardStrategy
+	ShardTemplate         string
+	ShardConfig           ShardConfig
+	DefaultAnalyzer       string
+	DefaultTokenizer      string
+	FieldMappings         []FieldMapping
+	MappingVersion        int
+	NgramConfig           NgramConfig
+	CooccurrenceConfigRaw json.RawMessage `json:"cooccurrence_config,omitempty"`
+	SearchPipelineRaw     json.RawMessage `json:"search_pipeline,omitempty"`
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
 }
 
 // CreateIndexRequest encapsulates the required information to register a new index.
 type CreateIndexRequest struct {
-	ID               string
-	Name             string
-	ShardStrategy    ShardStrategy
-	ShardTemplate    string
-	ShardConfig      ShardConfig
-	DefaultAnalyzer  string
-	DefaultTokenizer string
-	FieldMappings    []FieldMapping
-	MappingVersion   int
-	NgramConfig      *NgramConfig // nil means use default
-	InitialShardKeys []string
+	ID                    string
+	Name                  string
+	ShardStrategy         ShardStrategy
+	ShardTemplate         string
+	ShardConfig           ShardConfig
+	DefaultAnalyzer       string
+	DefaultTokenizer      string
+	FieldMappings         []FieldMapping
+	MappingVersion        int
+	NgramConfig           *NgramConfig    // nil means use default
+	CooccurrenceConfigRaw json.RawMessage `json:"cooccurrence_config,omitempty"`
+	SearchPipelineRaw     json.RawMessage `json:"search_pipeline,omitempty"`
+	InitialShardKeys      []string
 }
 
 // CreateIndexResponse returns the stored index definition.

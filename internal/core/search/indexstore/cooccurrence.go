@@ -27,43 +27,44 @@ var posEntriesPool = sync.Pool{
 type CooccurrenceConfig struct {
 	// Disabled skips co-occurrence extraction entirely.
 	// Useful for benchmarking pure Pebble ingestion throughput in isolation.
-	Disabled bool
+	Disabled bool `json:"disabled,omitempty"`
 
 	// WindowSize is the maximum positional distance within a sentence to count as co-occurring.
-	// Default: 5. Acts as a cap for very long sentences.
-	WindowSize int
-
-	// MaxDFThreshold skips ultra-common terms at drain time.
-	// Default: 10000.
-	MaxDFThreshold int64
-
-	// DrainInterval is how often accumulated pairs are drained to the adjacency matrix.
-	// Default: 10s.
-	DrainInterval time.Duration
+	// 0 = sentence boundary only (default). Positive values cap within sentence.
+	WindowSize int `json:"window_size,omitempty"`
 
 	// MinPairCount is the minimum co-occurrences before creating an edge.
 	// Default: 3.
-	MinPairCount int64
+	MinPairCount int64 `json:"min_pair_count,omitempty"`
 
-	// MaxExtractWorkers caps concurrent goroutines for O(n²) pair extraction.
-	// 0 = default (2). Kept low to avoid starving Pebble compaction and indexing.
-	MaxExtractWorkers int
+	// MaxDFThreshold skips ultra-common terms at drain time.
+	// Default: 10000.
+	MaxDFThreshold int64 `json:"max_df_threshold,omitempty"`
 
-	// MaxBufferSize caps the global co-occurrence buffer to prevent unbounded growth.
-	// 0 = default (200000).
-	MaxBufferSize int
+	// DistanceDecay controls the positional decay function: "log" (default), "linear", "quadratic".
+	DistanceDecay string `json:"distance_decay,omitempty"`
 
-	// EpochInterval is the cold epoch interval for NPMI scoring.
-	// Hot drains (DrainInterval) only merge counts; the cold epoch does
-	// a single DF prefix scan and computes NPMI for all accumulated pairs.
-	// 0 = default (90s).
-	EpochInterval time.Duration
+	// IncludeFields restricts co-occurrence extraction to these fields. Empty = all fields.
+	IncludeFields []string `json:"include_fields,omitempty"`
+
+	// WeightingMethod selects the edge weight formula: "npmi" (default), "llr", "dice".
+	WeightingMethod string `json:"weighting_method,omitempty"`
+
+	// PositionGapMode controls position numbering: "original" (default) keeps analyzer gaps,
+	// "compressed" renumbers positions sequentially within each sentence after stopword removal.
+	PositionGapMode string `json:"position_gap_mode,omitempty"`
+
+	// Worker tuning (node-level, not persisted in index definition)
+	DrainInterval     time.Duration `json:"-"`
+	MaxExtractWorkers int           `json:"-"`
+	MaxBufferSize     int           `json:"-"`
+	EpochInterval     time.Duration `json:"-"`
 }
 
 // DefaultCooccurrenceConfig returns sensible defaults.
 func DefaultCooccurrenceConfig() CooccurrenceConfig {
 	return CooccurrenceConfig{
-		WindowSize:     5,
+		WindowSize:     0, // 0 = sentence boundary only
 		MaxDFThreshold: 10000,
 		DrainInterval:  10 * time.Second,
 		MinPairCount:   3,
@@ -140,10 +141,33 @@ type cooccurrenceAccumulator struct {
 	wg         sync.WaitGroup
 }
 
-func newCooccurrenceAccumulator(cfg CooccurrenceConfig) *cooccurrenceAccumulator {
-	if cfg.WindowSize <= 0 {
-		cfg.WindowSize = 5
+// distanceWeight computes the positional decay weight for a given distance.
+func (a *cooccurrenceAccumulator) distanceWeight(dist int) float64 {
+	d := float64(dist)
+	switch a.cfg.DistanceDecay {
+	case "linear":
+		return 1.0 / d
+	case "quadratic":
+		return 1.0 / (d * d)
+	default: // "log" or empty
+		return 1.0 / math.Log2(1.0+d)
 	}
+}
+
+// fieldAllowed returns true if the field should be included in co-occurrence extraction.
+func (a *cooccurrenceAccumulator) fieldAllowed(field string) bool {
+	if len(a.cfg.IncludeFields) == 0 {
+		return true
+	}
+	for _, f := range a.cfg.IncludeFields {
+		if f == field {
+			return true
+		}
+	}
+	return false
+}
+
+func newCooccurrenceAccumulator(cfg CooccurrenceConfig) *cooccurrenceAccumulator {
 	if cfg.MaxDFThreshold <= 0 {
 		cfg.MaxDFThreshold = 10000
 	}
@@ -198,6 +222,9 @@ func (a *cooccurrenceAccumulator) extractWorker() {
 		for _, doc := range docs {
 			for field, terms := range doc.FieldTerms {
 				if len(terms) < 2 {
+					continue
+				}
+				if !a.fieldAllowed(field) {
 					continue
 				}
 				batchWg.Add(1)
@@ -262,10 +289,24 @@ func (a *cooccurrenceAccumulator) ExtractFromDocument(field string, terms []Term
 		return entries[i].pos < entries[j].pos
 	})
 
-	// Sliding window within each sentence group.
+	// Compressed position gap mode: renumber positions 0,1,2,... within each sentence.
+	if a.cfg.PositionGapMode == "compressed" {
+		seq := 0
+		prevSid := -1
+		for k := range entries {
+			if entries[k].sentenceID != prevSid {
+				seq = 0
+				prevSid = entries[k].sentenceID
+			}
+			entries[k].pos = seq
+			seq++
+		}
+	}
+
+	// Pair extraction within each sentence group.
 	lpPtr := localPairsPool.Get().(*[]cooccurrencePair)
 	local := (*lpPtr)[:0]
-	maxWindow := a.cfg.WindowSize
+	maxWindow := a.cfg.WindowSize // 0 = no window limit (sentence boundary only)
 
 	sentStart := 0
 	for sentStart < len(entries) {
@@ -275,11 +316,10 @@ func (a *cooccurrenceAccumulator) ExtractFromDocument(field string, terms []Term
 			sentEnd++
 		}
 
-		// Sliding window within this sentence
 		for i := sentStart; i < sentEnd; i++ {
 			for j := i + 1; j < sentEnd; j++ {
 				dist := entries[j].pos - entries[i].pos
-				if dist > maxWindow {
+				if maxWindow > 0 && dist > maxWindow {
 					break // sorted by position, so all further j are farther
 				}
 				ti, tj := entries[i].termIdx, entries[j].termIdx
@@ -292,7 +332,7 @@ func (a *cooccurrenceAccumulator) ExtractFromDocument(field string, terms []Term
 					termA, termB = termB, termA
 				}
 
-				w := 1.0 / math.Log2(1.0+float64(dist))
+				w := a.distanceWeight(dist)
 
 				local = append(local, cooccurrencePair{
 					TermA:       termA,
@@ -500,6 +540,81 @@ func computeNPMIWeight(cooccCount, dfA, dfB, totalDocs int64, avgWeight float64)
 	npmi := pmi / negLogPAB
 
 	weight := npmi * (1.0 + avgWeight)
+
+	if weight < 0 {
+		return 0
+	}
+	if weight > 1 {
+		return 1
+	}
+	return weight
+}
+
+// computeLLRWeight computes a Log-Likelihood Ratio edge weight with positional decay boost.
+// Uses the G² statistic from a 2×2 contingency table, normalized to [0,1].
+func computeLLRWeight(cooccCount, dfA, dfB, totalDocs int64, avgWeight float64) float64 {
+	if totalDocs <= 0 || dfA <= 0 || dfB <= 0 || cooccCount <= 0 {
+		return 0
+	}
+
+	n := float64(totalDocs)
+	k11 := float64(cooccCount)
+	k12 := float64(dfA) - k11
+	k21 := float64(dfB) - k11
+	k22 := n - float64(dfA) - float64(dfB) + k11
+
+	if k12 < 0 {
+		k12 = 0
+	}
+	if k21 < 0 {
+		k21 = 0
+	}
+	if k22 < 0 {
+		k22 = 0
+	}
+
+	llr := 0.0
+	cells := [4]struct{ obs, row, col float64 }{
+		{k11, k11 + k12, k11 + k21},
+		{k12, k11 + k12, k12 + k22},
+		{k21, k21 + k22, k11 + k21},
+		{k22, k21 + k22, k12 + k22},
+	}
+	for _, c := range cells {
+		if c.obs > 0 && c.row > 0 && c.col > 0 {
+			expected := c.row * c.col / n
+			if expected > 0 {
+				llr += c.obs * math.Log(c.obs/expected)
+			}
+		}
+	}
+	llr *= 2
+
+	// Normalize: divide by theoretical max (2*N*ln2) and boost with avgWeight.
+	norm := 2 * n * math.Ln2
+	if norm <= 0 {
+		return 0
+	}
+
+	weight := (llr / norm) * (1.0 + avgWeight)
+	if weight < 0 {
+		return 0
+	}
+	if weight > 1 {
+		return 1
+	}
+	return weight
+}
+
+// computeDiceWeight computes a Dice coefficient edge weight with positional decay boost.
+// Dice = 2 * count(A∩B) / (count(A) + count(B)), normalized to [0,1].
+func computeDiceWeight(cooccCount, dfA, dfB, totalDocs int64, avgWeight float64) float64 {
+	if dfA <= 0 || dfB <= 0 || cooccCount <= 0 {
+		return 0
+	}
+
+	dice := 2.0 * float64(cooccCount) / (float64(dfA) + float64(dfB))
+	weight := dice * (1.0 + avgWeight)
 
 	if weight < 0 {
 		return 0
